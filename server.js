@@ -6,7 +6,7 @@ require('dotenv').config();
 const app = express();
 app.use(express.json());
 
-// ---------- CORS ----------
+// CORS
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -15,7 +15,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// ---------- База данных ----------
+// База данных
 let db;
 try {
     db = new Database('users.db');
@@ -38,45 +38,59 @@ if (!BOT_TOKEN) {
     process.exit(1);
 }
 
-// ---------- Логирование запросов ----------
+// Логирование запросов
 app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
     next();
 });
 
-// ---------- Маршруты ----------
 app.get('/', (req, res) => res.send('Zora Backend is running'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
+// Создание инвойса – расширенная версия
 app.post('/api/create-invoice', async (req, res) => {
     try {
         const { telegram_id, amount } = req.body;
-        if (!telegram_id || !amount) return res.status(400).json({ error: 'telegram_id и amount обязательны' });
+        if (!telegram_id || !amount) {
+            return res.status(400).json({ error: 'telegram_id и amount обязательны' });
+        }
 
         console.log(`Creating invoice for user ${telegram_id}, amount ${amount}`);
-        const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                title: 'Пополнение звёзд',
-                description: `Покупка ${amount} Telegram Stars`,
-                payload: `stars_${telegram_id}_${amount}`,
-                provider_token: '',
-                currency: 'XTR',
-                prices: [{ label: 'Звёзды', amount: amount }]
-            })
-        });
+
+        const response = await fetch(
+            `https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title: 'Пополнение звёзд',
+                    description: `Покупка ${amount} Telegram Stars`,
+                    payload: `stars_${telegram_id}_${amount}`,
+                    provider_token: '',
+                    currency: 'XTR',
+                    prices: [{ label: 'Звёзды', amount: amount }]
+                })
+            }
+        );
 
         const data = await response.json();
-        console.log('Telegram API response:', data);
+        console.log('Telegram API response:', JSON.stringify(data));
+
         if (data.ok) {
             res.json({ invoiceLink: data.result });
         } else {
-            res.status(500).json({ error: 'Ошибка создания инвойса' });
+            // Возвращаем ошибку Telegram клиенту для диагностики
+            res.status(502).json({
+                error: 'Ошибка Telegram API',
+                details: data
+            });
         }
     } catch (err) {
         console.error('Error in /api/create-invoice:', err);
-        res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+        res.status(500).json({
+            error: 'Внутренняя ошибка сервера',
+            message: err.message
+        });
     }
 });
 
@@ -99,7 +113,6 @@ app.post('/webhook', (req, res) => {
     res.sendStatus(200);
 });
 
-// ---------- Запуск ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Backend running on port ${PORT}`);
