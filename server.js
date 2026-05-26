@@ -110,6 +110,7 @@ app.get('/api/balance/:telegram_id', (req, res) => {
 
 // ---------- Запуск ----------
 const PORT = process.env.PORT || 3000;
+app.get('/health', (req, res) => res.status(200).send('OK'));
 app.listen(PORT, () => {
     console.log(`Backend running on port ${PORT}`);
 });
