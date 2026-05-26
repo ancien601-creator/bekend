@@ -4,7 +4,19 @@ const fetch = require('node-fetch');
 require('dotenv').config();
 
 const app = express();
+
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*'); // или конкретный домен Netlify
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    res.header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    next();
+});
+
 app.use(express.json());
+
+
+
 
 const db = new Database('users.db');
 db.exec(`CREATE TABLE IF NOT EXISTS users (
