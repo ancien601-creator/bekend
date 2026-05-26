@@ -41,12 +41,6 @@ app.get('/api/balance/:telegram_id', (req, res) => {
     res.json({ balance: user ? user.balance : 50 });
 });
 
-// ---------- API для Mini App: создать инвойс (уже не используется, но оставим для совместимости) ----------
-app.post('/api/create-invoice', async (req, res) => {
-    // Теперь это не требуется, но оставим заглушку
-    res.status(410).json({ error: 'Используйте пополнение через бота' });
-});
-
 // ---------- Вебхук Telegram ----------
 app.post('/webhook', async (req, res) => {
     try {
@@ -65,55 +59,49 @@ app.post('/webhook', async (req, res) => {
             return res.sendStatus(200);
         }
 
-        // Обработка текстовых сообщений и команд
+        // Обработка текстовых сообщений
         if (update.message?.text) {
             const chatId = update.message.chat.id;
             const text = update.message.text.trim();
 
-            if (text === '/start' || text === 'Пополнить') {
-                // Отправляем счёт на пополнение
+            // Если сообщение – число (целое, >= 1)
+            const amount = parseInt(text);
+            if (!isNaN(amount) && amount >= 1) {
+                // Отправляем счёт на указанную сумму
                 await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendInvoice`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         chat_id: chatId,
                         title: 'Пополнение звёзд',
-                        description: 'Покупка Telegram Stars для Zora Imperial',
-                        payload: `stars_${chatId}_10`,   // фиксированная сумма 10 звёзд
+                        description: `Покупка ${amount} Telegram Stars`,
+                        payload: `stars_${chatId}_${amount}`,
                         provider_token: '',
                         currency: 'XTR',
-                        prices: [{ label: 'Звёзды', amount: 10 }],
-                        start_parameter: 'start',
-                        need_name: false,
-                        need_phone_number: false,
-                        need_email: false,
-                        need_shipping_address: false,
-                        send_phone_number_to_provider: false,
-                        send_email_to_provider: false,
-                        is_flexible: false,
-                        disable_notification: false,
-                        protect_content: false,
-                        reply_to_message_id: null,
-                        allow_sending_without_reply: true,
+                        prices: [{ label: 'Звёзды', amount: amount }],
                         reply_markup: JSON.stringify({
                             inline_keyboard: [[
-                                { text: 'Оплатить 10 ⭐', pay: true }
+                                { text: `Оплатить ${amount} ⭐`, pay: true }
                             ]]
                         })
                     })
                 });
             } else {
-                // Ответ на любое другое сообщение – показываем кнопку
+                // Не число – подсказка
                 await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         chat_id: chatId,
-                        text: 'Для пополнения баланса нажми кнопку ниже 👇',
+                        text: 'Введите число звёзд, которое хотите пополнить (минимум 1).\nНапример: 10',
                         reply_markup: JSON.stringify({
-                            keyboard: [[{ text: 'Пополнить' }]],
+                            keyboard: [
+                                [{ text: '10' }, { text: '25' }],
+                                [{ text: '50' }, { text: '100' }],
+                                [{ text: '200' }]
+                            ],
                             resize_keyboard: true,
-                            one_time_keyboard: false
+                            one_time_keyboard: true
                         })
                     })
                 });
