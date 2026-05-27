@@ -49,17 +49,24 @@ app.get('/health', (req, res) => res.status(200).send('OK'));
 
 // ---------- API для Mini App ----------
 app.get('/api/balance/:telegram_id', (req, res) => {
-    const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(req.params.telegram_id);
-    res.json({ balance: user ? user.balance : 50 });
+    const tid = req.params.telegram_id;
+    console.log(`[GET /api/balance/${tid}] requested`);
+    const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(tid);
+    const balance = user ? user.balance : 50;
+    console.log(`[GET /api/balance/${tid}] returning balance=${balance}`);
+    res.json({ balance });
 });
 
 app.post('/api/balance/:telegram_id', (req, res) => {
-    const { balance } = req.body;
     const tid = req.params.telegram_id;
+    const { balance } = req.body;
+    console.log(`[POST /api/balance/${tid}] body=`, req.body);
     if (typeof balance !== 'number' || balance < 0) {
+        console.log(`[POST /api/balance/${tid}] invalid balance`);
         return res.status(400).json({ error: 'Invalid balance' });
     }
     db.prepare('INSERT OR REPLACE INTO users (telegram_id, balance) VALUES (?, ?)').run(tid, balance);
+    console.log(`[POST /api/balance/${tid}] updated to ${balance}`);
     res.json({ success: true });
 });
 
@@ -67,9 +74,9 @@ app.post('/api/balance/:telegram_id', (req, res) => {
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
-        console.log('Update:', JSON.stringify(update));
+        console.log('Webhook update:', JSON.stringify(update));
 
-        // Успешный платёж
+        // Платёж
         if (update.message?.successful_payment) {
             const payload = update.message.successful_payment.invoice_payload;
             const match = payload.match(/^stars_(\d+)_(\d+)$/);
@@ -77,7 +84,7 @@ app.post('/webhook', async (req, res) => {
                 const userId = parseInt(match[1]);
                 const amount = parseInt(match[2]);
                 db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, userId);
-                console.log(`Пользователь ${userId} пополнил баланс на ${amount} звёзд`);
+                console.log(`Платёж: ${userId} +${amount}`);
             }
             return res.sendStatus(200);
         }
@@ -87,30 +94,21 @@ app.post('/webhook', async (req, res) => {
             const chatId = update.message.chat.id;
             const text = update.message.text.trim();
 
-            // Ожидание суммы вывода
             if (userStates[chatId] === 'awaiting_withdraw_amount') {
                 const amount = parseInt(text);
                 if (isNaN(amount) || amount < 1) {
-                    await sendMessage(chatId, 'Введите корректное целое число звёзд (минимум 1).');
+                    await sendMessage(chatId, 'Введите целое число звёзд (минимум 1).');
                 } else {
                     const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(chatId);
                     if (!user || user.balance < amount) {
-                        await sendMessage(chatId, 'Недостаточно звёзд для вывода.');
+                        await sendMessage(chatId, 'Недостаточно звёзд.');
                     } else {
                         db.prepare('INSERT INTO withdrawals (telegram_id, amount) VALUES (?, ?)').run(chatId, amount);
                         db.prepare('UPDATE users SET balance = balance - ? WHERE telegram_id = ?').run(amount, chatId);
-                        await sendMessage(chatId, `✅ Заявка на вывод ${amount} ⭐ создана. Ожидайте подтверждения.`);
+                        await sendMessage(chatId, `✅ Заявка на вывод ${amount} ⭐ создана.`);
                         if (ADMIN_ID) {
-                            const username = update.message.from.username
-                                ? `@${update.message.from.username}`
-                                : update.message.from.first_name;
-                            await sendMessage(
-                                ADMIN_ID,
-                                `📤 Новая заявка на вывод:\n` +
-                                `Пользователь: ${username} (ID: ${chatId})\n` +
-                                `Сумма: ${amount} ⭐\n` +
-                                `Дата: ${new Date().toLocaleString()}`
-                            );
+                            const username = update.message.from.username ? '@'+update.message.from.username : update.message.from.first_name;
+                            await sendMessage(ADMIN_ID, `📤 Вывод: ${username} (ID:${chatId}) сумма ${amount} ⭐`);
                         }
                     }
                 }
@@ -118,28 +116,21 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Команда /start
             if (text === '/start') {
-                await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
+                await sendMessage(chatId, 'Добро пожаловать!', {
                     reply_markup: {
-                        keyboard: [
-                            [{ text: '🎰 Начать играть', web_app: { url: WEBAPP_URL } }],
-                            [{ text: '👤 Профиль' }]
-                        ],
-                        resize_keyboard: true,
-                        one_time_keyboard: false
+                        keyboard: [[{ text: '🎰 Начать играть', web_app: { url: WEBAPP_URL } }], [{ text: '👤 Профиль' }]],
+                        resize_keyboard: true
                     }
                 });
                 return res.sendStatus(200);
             }
 
-            // Кнопка "Профиль"
             if (text === '👤 Профиль') {
                 await showProfile(chatId);
                 return res.sendStatus(200);
             }
 
-            // Обработка чисел для пополнения (старая логика)
             const amount = parseInt(text);
             if (!isNaN(amount) && amount >= 1) {
                 await createInvoice(chatId, amount);
@@ -148,7 +139,7 @@ app.post('/webhook', async (req, res) => {
             }
         }
 
-        // Обработка callback_data (inline кнопки)
+        // Callback кнопки
         if (update.callback_query) {
             const query = update.callback_query;
             const chatId = query.message.chat.id;
@@ -156,40 +147,30 @@ app.post('/webhook', async (req, res) => {
 
             if (data === 'profile') {
                 await showProfile(chatId);
-                await answerCallbackQuery(query.id);
             } else if (data === 'topup') {
-                await sendMessage(chatId, 'Введите сумму звёзд, которую хотите пополнить (минимум 1):', {
+                await sendMessage(chatId, 'Введите сумму звёзд (минимум 1):', {
                     reply_markup: {
-                        keyboard: [
-                            [{ text: '10' }, { text: '25' }],
-                            [{ text: '50' }, { text: '100' }],
-                            [{ text: '200' }]
-                        ],
+                        keyboard: [[{ text: '10' }, { text: '25' }], [{ text: '50' }, { text: '100' }], [{ text: '200' }]],
                         resize_keyboard: true,
                         one_time_keyboard: true
                     }
                 });
-                await answerCallbackQuery(query.id);
             } else if (data === 'withdraw') {
                 userStates[chatId] = 'awaiting_withdraw_amount';
-                await sendMessage(chatId, 'Введите сумму звёзд для вывода (минимум 1):');
-                await answerCallbackQuery(query.id);
+                await sendMessage(chatId, 'Введите сумму для вывода:');
             } else if (data === 'history') {
-                const withdrawals = db.prepare(
-                    'SELECT amount, status, created_at FROM withdrawals WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 5'
-                ).all(chatId);
-                if (withdrawals.length === 0) {
-                    await sendMessage(chatId, 'У вас пока нет заявок на вывод.');
+                const wds = db.prepare('SELECT amount, status, created_at FROM withdrawals WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 5').all(chatId);
+                if (wds.length === 0) {
+                    await sendMessage(chatId, 'Нет заявок на вывод.');
                 } else {
                     let text = '📋 История выводов:\n\n';
-                    withdrawals.forEach(w => {
-                        const date = new Date(w.created_at).toLocaleString();
-                        text += `• ${w.amount} ⭐ (${w.status}) — ${date}\n`;
+                    wds.forEach(w => {
+                        text += `• ${w.amount} ⭐ (${w.status}) — ${new Date(w.created_at).toLocaleString()}\n`;
                     });
                     await sendMessage(chatId, text);
                 }
-                await answerCallbackQuery(query.id);
             }
+            await answerCallbackQuery(query.id);
             return res.sendStatus(200);
         }
 
@@ -200,36 +181,25 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// ---------- Вспомогательные функции ----------
-
 async function sendMessage(chatId, text, extra = {}) {
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text, ...extra })
     });
 }
-
-async function answerCallbackQuery(callbackQueryId) {
+async function answerCallbackQuery(id) {
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ callback_query_id: callbackQueryId })
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: id })
     });
 }
-
 async function showProfile(chatId) {
     const user = db.prepare('SELECT balance, level, xp, xp_next FROM users WHERE telegram_id = ?').get(chatId);
     const balance = user ? user.balance : 50;
     const level = user ? user.level : 1;
     const xp = user ? user.xp : 0;
     const xpNext = user ? user.xp_next : 100;
-
-    const text = `👤 Ваш профиль:\n\n` +
-                 `⭐ Баланс: ${balance}\n` +
-                 `🎚 Уровень: ${level}\n` +
-                 `🔹 Опыт: ${xp}/${xpNext}`;
-
+    const text = `👤 Ваш профиль:\n\n⭐ Баланс: ${balance}\n🎚 Уровень: ${level}\n🔹 Опыт: ${xp}/${xpNext}`;
     await sendMessage(chatId, text, {
         reply_markup: {
             inline_keyboard: [
@@ -240,34 +210,28 @@ async function showProfile(chatId) {
         }
     });
 }
-
 async function createInvoice(chatId, amount) {
-    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+    const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             title: 'Пополнение звёзд',
-            description: `Покупка ${amount} Telegram Stars`,
+            description: `${amount} Stars`,
             payload: `stars_${chatId}_${amount}`,
-            provider_token: '',
-            currency: 'XTR',
-            prices: [{ label: 'Звёзды', amount: amount }]
+            provider_token: '', currency: 'XTR',
+            prices: [{ label: 'Звёзды', amount }]
         })
     });
-    const data = await response.json();
-    if (data.ok) {
-        await sendMessage(chatId, `Счёт на ${amount} ⭐ готов: [Оплатить](${data.result})`, {
+    const d = await r.json();
+    if (d.ok) {
+        await sendMessage(chatId, `Счёт на ${amount} ⭐: [Оплатить](${d.result})`, {
             parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [[{ text: `Оплатить ${amount} ⭐`, url: data.result }]]
-            }
+            reply_markup: { inline_keyboard: [[{ text: 'Оплатить', url: d.result }]] }
         });
     } else {
-        console.error('Invoice error:', data);
-        await sendMessage(chatId, 'Ошибка создания счёта. Попробуйте позже.');
+        console.error('Invoice error:', d);
+        await sendMessage(chatId, 'Ошибка создания счёта.');
     }
 }
 
-// ---------- Запуск ----------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`Backend running on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Server on ${PORT}`));
