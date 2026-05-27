@@ -96,16 +96,16 @@ app.post('/webhook', async (req, res) => {
             }
 
             if (text === '/start') {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            chat_id: chatId,
-            text: 'Тестовый ответ'
-        })
-    });
-    return res.sendStatus(200);
-}
+                try {
+                    console.log('Handling /start for', chatId);
+                    console.log('WEBAPP_URL:', WEBAPP_URL);
+                    await sendMessage(chatId, 'Привет! Проверка связи.');
+                    console.log('Message sent');
+                } catch (e) {
+            console.error('Error in /start:', e.message);
+            }
+            return res.sendStatus(200);
+        }
                 });
                 return res.sendStatus(200);
             }
