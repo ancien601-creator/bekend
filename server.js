@@ -34,6 +34,8 @@ db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = process.env.ADMIN_ID;
+const WEBAPP_URL = process.env.WEBAPP_URL || 'https://your-netlify-app.netlify.app';
+
 if (!BOT_TOKEN) {
     console.error('BOT_TOKEN is not set!');
     process.exit(1);
@@ -42,29 +44,22 @@ if (!BOT_TOKEN) {
 const userStates = {};
 
 // ---------- Здоровье ----------
-app.get('/', (req, res) => res.send('Zora Backend is running'));
+app.get('/', (req, res) => res.send('OK'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 // ---------- API для Mini App ----------
-// Получить баланс
 app.get('/api/balance/:telegram_id', (req, res) => {
     const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(req.params.telegram_id);
     res.json({ balance: user ? user.balance : 50 });
 });
 
-// Обновить баланс (синхронизация после игр)
 app.post('/api/balance/:telegram_id', (req, res) => {
     const { balance } = req.body;
-    const telegramId = req.params.telegram_id;
+    const tid = req.params.telegram_id;
     if (typeof balance !== 'number' || balance < 0) {
-        return res.status(400).json({ error: 'Некорректный баланс' });
+        return res.status(400).json({ error: 'Invalid balance' });
     }
-    db.prepare('UPDATE users SET balance = ? WHERE telegram_id = ?').run(balance, telegramId);
-    // Если пользователя нет – создаём
-    const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(telegramId);
-    if (!user) {
-        db.prepare('INSERT INTO users (telegram_id, balance) VALUES (?, ?)').run(telegramId, balance);
-    }
+    db.prepare('INSERT OR REPLACE INTO users (telegram_id, balance) VALUES (?, ?)').run(tid, balance);
     res.json({ success: true });
 });
 
@@ -128,7 +123,7 @@ app.post('/webhook', async (req, res) => {
                 await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
                     reply_markup: {
                         keyboard: [
-                            [{ text: '🎰 Начать играть', web_app: { url: process.env.WEBAPP_URL || 'https://your-app.netlify.app' } }],
+                            [{ text: '🎰 Начать играть', web_app: { url: WEBAPP_URL } }],
                             [{ text: '👤 Профиль' }]
                         ],
                         resize_keyboard: true,
@@ -247,7 +242,7 @@ async function showProfile(chatId) {
 }
 
 async function createInvoice(chatId, amount) {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`, {
+    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -258,19 +253,19 @@ async function createInvoice(chatId, amount) {
             currency: 'XTR',
             prices: [{ label: 'Звёзды', amount: amount }]
         })
-    }).then(r => r.json()).then(data => {
-        if (data.ok) {
-            return sendMessage(chatId, `Счёт на ${amount} ⭐ готов: [Оплатить](${data.result})`, {
-                parse_mode: 'Markdown',
-                reply_markup: {
-                    inline_keyboard: [[{ text: `Оплатить ${amount} ⭐`, url: data.result }]]
-                }
-            });
-        } else {
-            console.error('Invoice error:', data);
-            sendMessage(chatId, 'Ошибка создания счёта. Попробуйте позже.');
-        }
     });
+    const data = await response.json();
+    if (data.ok) {
+        await sendMessage(chatId, `Счёт на ${amount} ⭐ готов: [Оплатить](${data.result})`, {
+            parse_mode: 'Markdown',
+            reply_markup: {
+                inline_keyboard: [[{ text: `Оплатить ${amount} ⭐`, url: data.result }]]
+            }
+        });
+    } else {
+        console.error('Invoice error:', data);
+        await sendMessage(chatId, 'Ошибка создания счёта. Попробуйте позже.');
+    }
 }
 
 // ---------- Запуск ----------
