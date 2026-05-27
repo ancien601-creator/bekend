@@ -96,14 +96,16 @@ app.post('/webhook', async (req, res) => {
             }
 
             if (text === '/start') {
-                await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
-                    reply_markup: {
-                        keyboard: [
-                            [{ text: '🎰 Начать играть', web_app: { url: WEBAPP_URL } }],
-                            [{ text: '👤 Профиль' }]
-                        ],
-                        resize_keyboard: true
-                    }
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            chat_id: chatId,
+            text: 'Тестовый ответ'
+        })
+    });
+    return res.sendStatus(200);
+}
                 });
                 return res.sendStatus(200);
             }
