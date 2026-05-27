@@ -24,12 +24,23 @@ db.exec(`CREATE TABLE IF NOT EXISTS users (
     xp INTEGER DEFAULT 0,
     xp_next INTEGER DEFAULT 100
 )`);
+db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER,
+    amount INTEGER,
+    status TEXT DEFAULT 'pending',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)`);
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const ADMIN_ID = process.env.ADMIN_ID;   // числовой ID админа, например 123456789
 if (!BOT_TOKEN) {
     console.error('BOT_TOKEN is not set!');
     process.exit(1);
 }
+
+// Простейшее хранилище состояний пользователей (ожидание суммы вывода)
+const userStates = {};
 
 // ---------- Здоровье ----------
 app.get('/', (req, res) => res.send('Zora Backend is running'));
@@ -45,8 +56,9 @@ app.get('/api/balance/:telegram_id', (req, res) => {
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
+        console.log('Update:', JSON.stringify(update));
 
-        // Обработка успешного платежа
+        // Платёж
         if (update.message?.successful_payment) {
             const payload = update.message.successful_payment.invoice_payload;
             const match = payload.match(/^stars_(\d+)_(\d+)$/);
@@ -59,53 +71,119 @@ app.post('/webhook', async (req, res) => {
             return res.sendStatus(200);
         }
 
-        // Обработка текстовых сообщений
+        // Текстовые сообщения
         if (update.message?.text) {
             const chatId = update.message.chat.id;
             const text = update.message.text.trim();
 
-            // Если сообщение – число (целое, >= 1)
+            // Обработка состояний (если пользователь ожидает сумму вывода)
+            if (userStates[chatId] === 'awaiting_withdraw_amount') {
+                const amount = parseInt(text);
+                if (isNaN(amount) || amount < 1) {
+                    await sendMessage(chatId, 'Введите корректное целое число звёзд (минимум 1).');
+                } else {
+                    // Проверка баланса
+                    const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(chatId);
+                    if (!user || user.balance < amount) {
+                        await sendMessage(chatId, 'Недостаточно звёзд для вывода.');
+                    } else {
+                        // Создаём заявку
+                        db.prepare('INSERT INTO withdrawals (telegram_id, amount) VALUES (?, ?)').run(chatId, amount);
+                        // Уменьшаем баланс (или оставляем до подтверждения — решите сами, пока уменьшим)
+                        db.prepare('UPDATE users SET balance = balance - ? WHERE telegram_id = ?').run(amount, chatId);
+                        await sendMessage(chatId, `✅ Заявка на вывод ${amount} ⭐ создана. Ожидайте подтверждения.`);
+                        // Уведомление админу
+                        if (ADMIN_ID) {
+                            const username = update.message.from.username
+                                ? `@${update.message.from.username}`
+                                : update.message.from.first_name;
+                            await sendMessage(
+                                ADMIN_ID,
+                                `📤 Новая заявка на вывод:\n` +
+                                `Пользователь: ${username} (ID: ${chatId})\n` +
+                                `Сумма: ${amount} ⭐\n` +
+                                `Дата: ${new Date().toLocaleString()}`
+                            );
+                        }
+                    }
+                }
+                delete userStates[chatId];
+                return res.sendStatus(200);
+            }
+
+            // Команда /start
+            if (text === '/start') {
+                await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
+                    reply_markup: {
+                        keyboard: [
+                            [{ text: '🎰 Начать играть', web_app: { url: process.env.WEBAPP_URL || 'https://your-app.netlify.app' } }],
+                            [{ text: '👤 Профиль' }]
+                        ],
+                        resize_keyboard: true,
+                        one_time_keyboard: false
+                    }
+                });
+                return res.sendStatus(200);
+            }
+
+            // Кнопка "Профиль"
+            if (text === '👤 Профиль') {
+                await showProfile(chatId);
+                return res.sendStatus(200);
+            }
+
+            // Обработка чисел для пополнения (старая логика)
             const amount = parseInt(text);
             if (!isNaN(amount) && amount >= 1) {
-                // Отправляем счёт на указанную сумму
-                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendInvoice`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        chat_id: chatId,
-                        title: 'Пополнение звёзд',
-                        description: `Покупка ${amount} Telegram Stars`,
-                        payload: `stars_${chatId}_${amount}`,
-                        provider_token: '',
-                        currency: 'XTR',
-                        prices: [{ label: 'Звёзды', amount: amount }],
-                        reply_markup: JSON.stringify({
-                            inline_keyboard: [[
-                                { text: `Оплатить ${amount} ⭐`, pay: true }
-                            ]]
-                        })
-                    })
-                });
+                await createInvoice(chatId, amount);
             } else {
-                // Не число – подсказка
-                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        chat_id: chatId,
-                        text: 'Введите число звёзд, которое хотите пополнить (минимум 1).\nНапример: 10',
-                        reply_markup: JSON.stringify({
-                            keyboard: [
-                                [{ text: '10' }, { text: '25' }],
-                                [{ text: '50' }, { text: '100' }],
-                                [{ text: '200' }]
-                            ],
-                            resize_keyboard: true,
-                            one_time_keyboard: true
-                        })
-                    })
-                });
+                await sendMessage(chatId, 'Используйте кнопки меню.');
             }
+        }
+
+        // Обработка callback_data (inline кнопки)
+        if (update.callback_query) {
+            const query = update.callback_query;
+            const chatId = query.message.chat.id;
+            const data = query.data;
+
+            if (data === 'profile') {
+                await showProfile(chatId);
+                await answerCallbackQuery(query.id);
+            } else if (data === 'topup') {
+                await sendMessage(chatId, 'Введите сумму звёзд, которую хотите пополнить (минимум 1):', {
+                    reply_markup: {
+                        keyboard: [
+                            [{ text: '10' }, { text: '25' }],
+                            [{ text: '50' }, { text: '100' }],
+                            [{ text: '200' }]
+                        ],
+                        resize_keyboard: true,
+                        one_time_keyboard: true
+                    }
+                });
+                await answerCallbackQuery(query.id);
+            } else if (data === 'withdraw') {
+                userStates[chatId] = 'awaiting_withdraw_amount';
+                await sendMessage(chatId, 'Введите сумму звёзд для вывода (минимум 1):');
+                await answerCallbackQuery(query.id);
+            } else if (data === 'history') {
+                const withdrawals = db.prepare(
+                    'SELECT amount, status, created_at FROM withdrawals WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 5'
+                ).all(chatId);
+                if (withdrawals.length === 0) {
+                    await sendMessage(chatId, 'У вас пока нет заявок на вывод.');
+                } else {
+                    let text = '📋 История выводов:\n\n';
+                    withdrawals.forEach(w => {
+                        const date = new Date(w.created_at).toLocaleString();
+                        text += `• ${w.amount} ⭐ (${w.status}) — ${date}\n`;
+                    });
+                    await sendMessage(chatId, text);
+                }
+                await answerCallbackQuery(query.id);
+            }
+            return res.sendStatus(200);
         }
 
         res.sendStatus(200);
@@ -114,6 +192,74 @@ app.post('/webhook', async (req, res) => {
         res.sendStatus(500);
     }
 });
+
+// ---------- Вспомогательные функции ----------
+
+async function sendMessage(chatId, text, extra = {}) {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text, ...extra })
+    });
+}
+
+async function answerCallbackQuery(callbackQueryId) {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQueryId })
+    });
+}
+
+async function showProfile(chatId) {
+    const user = db.prepare('SELECT balance, level, xp, xp_next FROM users WHERE telegram_id = ?').get(chatId);
+    const balance = user ? user.balance : 50;
+    const level = user ? user.level : 1;
+    const xp = user ? user.xp : 0;
+    const xpNext = user ? user.xp_next : 100;
+
+    const text = `👤 Ваш профиль:\n\n` +
+                 `⭐ Баланс: ${balance}\n` +
+                 `🎚 Уровень: ${level}\n` +
+                 `🔹 Опыт: ${xp}/${xpNext}`;
+
+    await sendMessage(chatId, text, {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '💳 Пополнить', callback_data: 'topup' }],
+                [{ text: '💸 Вывести', callback_data: 'withdraw' }],
+                [{ text: '📋 История выводов', callback_data: 'history' }]
+            ]
+        }
+    });
+}
+
+async function createInvoice(chatId, amount) {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            title: 'Пополнение звёзд',
+            description: `Покупка ${amount} Telegram Stars`,
+            payload: `stars_${chatId}_${amount}`,
+            provider_token: '',
+            currency: 'XTR',
+            prices: [{ label: 'Звёзды', amount: amount }]
+        })
+    }).then(r => r.json()).then(data => {
+        if (data.ok) {
+            return sendMessage(chatId, `Счёт на ${amount} ⭐ готов: [Оплатить](${data.result})`, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [[{ text: `Оплатить ${amount} ⭐`, url: data.result }]]
+                }
+            });
+        } else {
+            console.error('Invoice error:', data);
+            sendMessage(chatId, 'Ошибка создания счёта. Попробуйте позже.');
+        }
+    });
+}
 
 // ---------- Запуск ----------
 const PORT = process.env.PORT || 3000;
