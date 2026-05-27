@@ -39,24 +39,21 @@ if (!BOT_TOKEN) {
     process.exit(1);
 }
 
-// Состояния пользователей
-const userStates = {};
-
-// Здоровье
-app.get('/', (req, res) => res.send('Zora Backend is running'));
+// Healthcheck (очень важно)
 app.get('/health', (req, res) => res.status(200).send('OK'));
+app.get('/', (req, res) => res.send('Zora Backend is running'));
 
-// API баланса для Mini App
+// API для Mini App
 app.get('/api/balance/:telegram_id', (req, res) => {
     const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(req.params.telegram_id);
     res.json({ balance: user ? user.balance : 50 });
 });
 
 // Вебхук Telegram
+const userStates = {};
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
-        console.log('Update:', JSON.stringify(update));
 
         // Платёж
         if (update.message?.successful_payment) {
@@ -66,7 +63,6 @@ app.post('/webhook', async (req, res) => {
                 const userId = parseInt(match[1]);
                 const amount = parseInt(match[2]);
                 db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, userId);
-                console.log(`Пользователь ${userId} пополнил баланс на ${amount} звёзд`);
             }
             return res.sendStatus(200);
         }
@@ -76,30 +72,21 @@ app.post('/webhook', async (req, res) => {
             const chatId = update.message.chat.id;
             const text = update.message.text.trim();
 
-            // Состояние ожидания суммы вывода
             if (userStates[chatId] === 'awaiting_withdraw_amount') {
                 const amount = parseInt(text);
                 if (isNaN(amount) || amount < 1) {
-                    await sendMessage(chatId, 'Введите корректное целое число звёзд (минимум 1).');
+                    await sendMessage(chatId, 'Введите число больше 0.');
                 } else {
                     const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(chatId);
                     if (!user || user.balance < amount) {
-                        await sendMessage(chatId, 'Недостаточно звёзд для вывода.');
+                        await sendMessage(chatId, 'Недостаточно звёзд.');
                     } else {
                         db.prepare('INSERT INTO withdrawals (telegram_id, amount) VALUES (?, ?)').run(chatId, amount);
                         db.prepare('UPDATE users SET balance = balance - ? WHERE telegram_id = ?').run(amount, chatId);
-                        await sendMessage(chatId, `✅ Заявка на вывод ${amount} ⭐ создана. Ожидайте подтверждения.`);
+                        await sendMessage(chatId, `✅ Заявка на ${amount} ⭐ создана.`);
                         if (ADMIN_ID) {
-                            const username = update.message.from.username
-                                ? `@${update.message.from.username}`
-                                : update.message.from.first_name;
-                            await sendMessage(
-                                ADMIN_ID,
-                                `📤 Новая заявка на вывод:\n` +
-                                `Пользователь: ${username} (ID: ${chatId})\n` +
-                                `Сумма: ${amount} ⭐\n` +
-                                `Дата: ${new Date().toLocaleString()}`
-                            );
+                            const username = update.message.from.username ? `@${update.message.from.username}` : update.message.from.first_name;
+                            await sendMessage(ADMIN_ID, `📤 Вывод: ${username} (${chatId}) — ${amount} ⭐`);
                         }
                     }
                 }
@@ -107,7 +94,6 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Команда /start
             if (text === '/start') {
                 const webAppUrl = process.env.WEBAPP_URL || 'https://your-app.netlify.app';
                 await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
@@ -116,28 +102,20 @@ app.post('/webhook', async (req, res) => {
                             [{ text: '🎰 Начать играть', web_app: { url: webAppUrl } }],
                             [{ text: '👤 Профиль' }]
                         ],
-                        resize_keyboard: true,
-                        one_time_keyboard: false
+                        resize_keyboard: true
                     }
                 });
                 return res.sendStatus(200);
             }
 
-            // Кнопка "Профиль"
             if (text === '👤 Профиль') {
                 await showProfile(chatId);
                 return res.sendStatus(200);
             }
 
-            // Любое число – пополнение (только если бот подключен к Stars)
             const amount = parseInt(text);
             if (!isNaN(amount) && amount >= 1) {
-                try {
-                    await createInvoice(chatId, amount);
-                } catch (e) {
-                    console.error('Invoice error:', e);
-                    await sendMessage(chatId, 'Ошибка создания счёта. Попробуйте позже.');
-                }
+                await createInvoice(chatId, amount);
             } else {
                 await sendMessage(chatId, 'Используйте кнопки меню.');
             }
@@ -149,31 +127,21 @@ app.post('/webhook', async (req, res) => {
             const chatId = query.message.chat.id;
             const data = query.data;
 
-            if (data === 'profile') {
-                await showProfile(chatId);
-            } else if (data === 'topup') {
-                await sendMessage(chatId, 'Введите сумму звёзд для пополнения (минимум 1):', {
+            if (data === 'profile') await showProfile(chatId);
+            else if (data === 'topup') {
+                await sendMessage(chatId, 'Введите сумму звёзд для пополнения:', {
                     reply_markup: {
-                        keyboard: [[{ text: '10' }, { text: '25' }], [{ text: '50' }, { text: '100' }], [{ text: '200' }]],
-                        resize_keyboard: true,
-                        one_time_keyboard: true
+                        keyboard: [[{ text: '10' }, { text: '25' }], [{ text: '50' }, { text: '100' }]],
+                        resize_keyboard: true, one_time_keyboard: true
                     }
                 });
             } else if (data === 'withdraw') {
                 userStates[chatId] = 'awaiting_withdraw_amount';
-                await sendMessage(chatId, 'Введите сумму звёзд для вывода (минимум 1):');
+                await sendMessage(chatId, 'Введите сумму вывода:');
             } else if (data === 'history') {
                 const withdrawals = db.prepare('SELECT amount, status, created_at FROM withdrawals WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 5').all(chatId);
-                if (withdrawals.length === 0) {
-                    await sendMessage(chatId, 'У вас пока нет заявок на вывод.');
-                } else {
-                    let text = '📋 История выводов:\n\n';
-                    withdrawals.forEach(w => {
-                        const date = new Date(w.created_at).toLocaleString();
-                        text += `• ${w.amount} ⭐ (${w.status}) — ${date}\n`;
-                    });
-                    await sendMessage(chatId, text);
-                }
+                const text = withdrawals.length ? withdrawals.map(w => `• ${w.amount} ⭐ (${w.status}) — ${new Date(w.created_at).toLocaleString()}`).join('\n') : 'Нет заявок.';
+                await sendMessage(chatId, `📋 История:\n${text}`);
             }
             await answerCallbackQuery(query.id);
             return res.sendStatus(200);
@@ -186,30 +154,22 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
+// Вспомогательные функции
 async function sendMessage(chatId, text, extra = {}) {
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text, ...extra })
     });
 }
-
-async function answerCallbackQuery(callbackQueryId) {
+async function answerCallbackQuery(id) {
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ callback_query_id: callbackQueryId })
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: id })
     });
 }
-
 async function showProfile(chatId) {
     const user = db.prepare('SELECT balance, level, xp, xp_next FROM users WHERE telegram_id = ?').get(chatId);
-    const balance = user ? user.balance : 50;
-    const level = user ? user.level : 1;
-    const xp = user ? user.xp : 0;
-    const xpNext = user ? user.xp_next : 100;
-
-    const text = `👤 Ваш профиль:\n\n⭐ Баланс: ${balance}\n🎚 Уровень: ${level}\n🔹 Опыт: ${xp}/${xpNext}`;
+    const text = `👤 Профиль\n⭐ Баланс: ${user?.balance || 50}\n🎚 Уровень: ${user?.level || 1}\n🔹 Опыт: ${user?.xp || 0}/${user?.xp_next || 100}`;
     await sendMessage(chatId, text, {
         reply_markup: {
             inline_keyboard: [
@@ -220,30 +180,26 @@ async function showProfile(chatId) {
         }
     });
 }
-
 async function createInvoice(chatId, amount) {
-    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+    const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             title: 'Пополнение звёзд',
-            description: `Покупка ${amount} Telegram Stars`,
+            description: `Покупка ${amount} Stars`,
             payload: `stars_${chatId}_${amount}`,
             provider_token: '',
             currency: 'XTR',
             prices: [{ label: 'Звёзды', amount: amount }]
         })
     });
-    const data = await response.json();
+    const data = await res.json();
     if (data.ok) {
-        await sendMessage(chatId, `Счёт на ${amount} ⭐ готов: [Оплатить](${data.result})`, {
+        await sendMessage(chatId, `Счёт на ${amount} ⭐: [Оплатить](${data.result})`, {
             parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [[{ text: `Оплатить ${amount} ⭐`, url: data.result }]]
-            }
+            reply_markup: { inline_keyboard: [[{ text: `Оплатить ${amount} ⭐`, url: data.result }]] }
         });
     } else {
-        throw new Error('Invoice creation failed');
+        throw new Error('Invoice failed');
     }
 }
 
