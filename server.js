@@ -49,6 +49,23 @@ app.get('/api/balance/:telegram_id', (req, res) => {
     res.json({ balance: user ? user.balance : 50 });
 });
 
+
+// Синхронизация баланса из Mini App
+app.post('/api/sync', (req, res) => {
+    try {
+        const { telegram_id, balance } = req.body;
+        if (!telegram_id || balance === undefined) {
+            return res.status(400).json({ error: 'Missing fields' });
+        }
+        db.prepare('UPDATE users SET balance = ? WHERE telegram_id = ?').run(balance, telegram_id);
+        console.log(`Balance synced for user ${telegram_id}: ${balance} ⭐`);
+        res.json({ success: true });
+    } catch (e) {
+        console.error('Sync error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
