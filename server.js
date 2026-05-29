@@ -50,7 +50,6 @@ app.get('/api/balance/:telegram_id', (req, res) => {
     const tid = req.params.telegram_id;
     const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(tid);
     const balance = user ? user.balance : 0;
-    console.log(`[GET /api/balance/${tid}] → ${balance}`);
     res.json({ balance });
 });
 
@@ -92,14 +91,11 @@ app.post('/webhook', async (req, res) => {
             if (match) {
                 const userId = parseInt(match[1]);
                 const amount = parseInt(match[2]);
-
-                // Создаём запись пользователя, если её ещё нет
+                // Создаём запись, если её ещё нет, и увеличиваем баланс
                 db.prepare('INSERT OR IGNORE INTO users (telegram_id, balance) VALUES (?, 0)').run(userId);
                 db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, userId);
-
                 const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(userId);
                 console.log(`Пользователь ${userId} пополнил баланс на ${amount} звёзд, текущий баланс: ${user.balance}`);
-                // Отправляем подтверждение пользователю
                 await sendMessage(userId, `✅ Ваш баланс пополнен на ${amount} ⭐. Текущий баланс: ${user.balance} ⭐`);
             }
             return res.sendStatus(200);
@@ -135,7 +131,7 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Пополнение: число >= 1
+            // Пополнение: если пользователь отправил число (>=1)
             const amount = parseInt(text);
             if (!isNaN(amount) && amount >= 1) {
                 await createInvoice(chatId, amount);
@@ -144,7 +140,7 @@ app.post('/webhook', async (req, res) => {
             }
         }
 
-        // Callback-запросы
+        // Callback-запросы (inline‑кнопки)
         if (update.callback_query) {
             const query = update.callback_query;
             const chatId = query.message.chat.id;
