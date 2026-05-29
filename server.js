@@ -60,7 +60,6 @@ app.post('/api/balance/:telegram_id', (req, res) => {
     if (typeof balance !== 'number' || balance < 0) {
         return res.status(400).json({ error: 'Invalid balance' });
     }
-    // Сохраняем баланс (перезаписываем)
     db.prepare('INSERT OR REPLACE INTO users (telegram_id, balance) VALUES (?, ?)').run(tid, balance);
     console.log(`[POST /api/balance/${tid}] updated to ${balance}`);
     res.json({ success: true });
@@ -94,14 +93,13 @@ app.post('/webhook', async (req, res) => {
                 const userId = parseInt(match[1]);
                 const amount = parseInt(match[2]);
 
-                // Гарантируем существование записи пользователя с балансом 0
+                // Создаём запись пользователя, если её ещё нет
                 db.prepare('INSERT OR IGNORE INTO users (telegram_id, balance) VALUES (?, 0)').run(userId);
-                // Теперь увеличиваем баланс
                 db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, userId);
 
                 const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(userId);
                 console.log(`Пользователь ${userId} пополнил баланс на ${amount} звёзд, текущий баланс: ${user.balance}`);
-                // Отправляем подтверждение
+                // Отправляем подтверждение пользователю
                 await sendMessage(userId, `✅ Ваш баланс пополнен на ${amount} ⭐. Текущий баланс: ${user.balance} ⭐`);
             }
             return res.sendStatus(200);
