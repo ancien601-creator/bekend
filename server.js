@@ -105,7 +105,7 @@ app.post('/webhook', async (req, res) => {
 
             if (text === '/start') {
                 console.log('Обработка /start');
-                await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
+                await sendMessage(chatId, 'Добро пожаловать в казино БЕСКАНДАЛА!', {
                     reply_markup: {
                         keyboard: [
                             [{ text: '🎰 Начать играть', web_app: { url: WEBAPP_URL } }],
