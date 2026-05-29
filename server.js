@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 });
 
 // ---------- База данных ----------
-const db = new Database('users1.db');
+const db = new Database('users.db');
 db.exec(`CREATE TABLE IF NOT EXISTS users (
     telegram_id INTEGER PRIMARY KEY,
     balance INTEGER DEFAULT 0,
@@ -69,7 +69,7 @@ app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
 
-        // Обработка pre_checkout_query (ОБЯЗАТЕЛЬНО для платежей)
+        // Обработка pre_checkout_query (ОБЯЗАТЕЛЬНО)
         if (update.pre_checkout_query) {
             const query = update.pre_checkout_query;
             await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerPreCheckoutQuery`, {
@@ -92,7 +92,6 @@ app.post('/webhook', async (req, res) => {
                 const amount = parseInt(match[2]);
                 db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, userId);
                 console.log(`Пользователь ${userId} пополнил баланс на ${amount} звёзд`);
-                // Отправляем подтверждение
                 await sendMessage(userId, `✅ Ваш баланс пополнен на ${amount} ⭐. Можете играть!`);
             }
             return res.sendStatus(200);
@@ -128,7 +127,6 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Пополнение: число >= 1
             const amount = parseInt(text);
             if (!isNaN(amount) && amount >= 1) {
                 await createInvoice(chatId, amount);
@@ -137,7 +135,7 @@ app.post('/webhook', async (req, res) => {
             }
         }
 
-        // Callback-запросы (inline-кнопки)
+        // Callback-запросы
         if (update.callback_query) {
             const query = update.callback_query;
             const chatId = query.message.chat.id;
