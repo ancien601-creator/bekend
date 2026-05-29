@@ -79,6 +79,8 @@ app.post('/webhook', async (req, res) => {
                 const amount = parseInt(match[2]);
                 db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, userId);
                 console.log(`Пользователь ${userId} пополнил баланс на ${amount} звёзд`);
+                // Отправляем подтверждение пользователю
+                await sendMessage(userId, `✅ Ваш баланс пополнен на ${amount} ⭐. Можете играть!`);
             }
             return res.sendStatus(200);
         }
@@ -88,7 +90,6 @@ app.post('/webhook', async (req, res) => {
             const chatId = update.message.chat.id;
             const text = update.message.text.trim();
 
-            // Команда /start
             if (text === '/start') {
                 await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
                     reply_markup: {
@@ -103,20 +104,17 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Команда /balance
             if (text === '/balance') {
                 const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(chatId);
                 await sendMessage(chatId, `Ваш баланс: ${user ? user.balance : 0} ⭐`);
                 return res.sendStatus(200);
             }
 
-            // Кнопка "Профиль"
             if (text === '👤 Профиль') {
                 await showProfile(chatId);
                 return res.sendStatus(200);
             }
 
-            // Пополнение: если пользователь отправил число (>=1)
             const amount = parseInt(text);
             if (!isNaN(amount) && amount >= 1) {
                 await createInvoice(chatId, amount);
@@ -125,7 +123,7 @@ app.post('/webhook', async (req, res) => {
             }
         }
 
-        // Обработка callback_data (inline кнопки)
+        // Callback-запросы (inline-кнопки)
         if (update.callback_query) {
             const query = update.callback_query;
             const chatId = query.message.chat.id;
@@ -135,7 +133,6 @@ app.post('/webhook', async (req, res) => {
                 await showProfile(chatId);
                 await answerCallbackQuery(query.id);
             } else if (data === 'topup') {
-                // Просим ввести сумму
                 await sendMessage(chatId, 'Введите сумму звёзд для пополнения (минимум 1):', {
                     reply_markup: {
                         keyboard: [
@@ -149,7 +146,6 @@ app.post('/webhook', async (req, res) => {
                 });
                 await answerCallbackQuery(query.id);
             } else if (data === 'withdraw') {
-                // Клавиатура с выбором суммы вывода
                 await sendMessage(chatId, 'Выберите сумму для вывода:', {
                     reply_markup: {
                         inline_keyboard: [
@@ -209,7 +205,6 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ---------- Вспомогательные функции ----------
-
 async function sendMessage(chatId, text, extra = {}) {
     try {
         await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
