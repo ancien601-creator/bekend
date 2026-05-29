@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 });
 
 // ---------- База данных ----------
-const db = new Database('users.db');
+const db = new Database('users1.db');
 db.exec(`CREATE TABLE IF NOT EXISTS users (
     telegram_id INTEGER PRIMARY KEY,
     balance INTEGER DEFAULT 0,
