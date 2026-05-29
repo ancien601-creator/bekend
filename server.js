@@ -50,6 +50,7 @@ app.get('/api/balance/:telegram_id', (req, res) => {
     const tid = req.params.telegram_id;
     const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(tid);
     const balance = user ? user.balance : 0;
+    console.log(`[GET /api/balance/${tid}] → ${balance}`);
     res.json({ balance });
 });
 
@@ -68,8 +69,9 @@ app.post('/api/balance/:telegram_id', (req, res) => {
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
+        console.log('Update:', JSON.stringify(update).slice(0, 200));
 
-        // Обработка pre_checkout_query (ОБЯЗАТЕЛЬНО)
+        // pre_checkout_query – обязательно для платежей
         if (update.pre_checkout_query) {
             const query = update.pre_checkout_query;
             await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerPreCheckoutQuery`, {
@@ -92,6 +94,7 @@ app.post('/webhook', async (req, res) => {
                 const amount = parseInt(match[2]);
                 db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, userId);
                 console.log(`Пользователь ${userId} пополнил баланс на ${amount} звёзд`);
+                // Отправляем подтверждение
                 await sendMessage(userId, `✅ Ваш баланс пополнен на ${amount} ⭐. Можете играть!`);
             }
             return res.sendStatus(200);
@@ -127,6 +130,7 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
+            // Пополнение: число >= 1
             const amount = parseInt(text);
             if (!isNaN(amount) && amount >= 1) {
                 await createInvoice(chatId, amount);
