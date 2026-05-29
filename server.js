@@ -70,16 +70,13 @@ app.post('/webhook', async (req, res) => {
         const update = req.body;
         console.log('Update:', JSON.stringify(update).slice(0, 200));
 
-        // pre_checkout_query – обязательно для платежей
+        // pre_checkout_query
         if (update.pre_checkout_query) {
             const query = update.pre_checkout_query;
             await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerPreCheckoutQuery`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    pre_checkout_query_id: query.id,
-                    ok: true
-                })
+                body: JSON.stringify({ pre_checkout_query_id: query.id, ok: true })
             });
             return res.sendStatus(200);
         }
@@ -91,7 +88,6 @@ app.post('/webhook', async (req, res) => {
             if (match) {
                 const userId = parseInt(match[1]);
                 const amount = parseInt(match[2]);
-                // Создаём запись, если её ещё нет, и увеличиваем баланс
                 db.prepare('INSERT OR IGNORE INTO users (telegram_id, balance) VALUES (?, 0)').run(userId);
                 db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, userId);
                 const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(userId);
@@ -105,8 +101,10 @@ app.post('/webhook', async (req, res) => {
         if (update.message?.text) {
             const chatId = update.message.chat.id;
             const text = update.message.text.trim();
+            console.log(`Получено сообщение от ${chatId}: "${text}"`);
 
             if (text === '/start') {
+                console.log('Обработка /start');
                 await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
                     reply_markup: {
                         keyboard: [
@@ -121,30 +119,34 @@ app.post('/webhook', async (req, res) => {
             }
 
             if (text === '/balance') {
+                console.log('Обработка /balance');
                 const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(chatId);
                 await sendMessage(chatId, `Ваш баланс: ${user ? user.balance : 0} ⭐`);
                 return res.sendStatus(200);
             }
 
             if (text === '👤 Профиль') {
+                console.log('Обработка Профиль');
                 await showProfile(chatId);
                 return res.sendStatus(200);
             }
 
-            // Пополнение: если пользователь отправил число (>=1)
             const amount = parseInt(text);
             if (!isNaN(amount) && amount >= 1) {
+                console.log('Пополнение на', amount);
                 await createInvoice(chatId, amount);
             } else {
+                console.log('Неизвестная команда');
                 await sendMessage(chatId, 'Используйте кнопки меню.');
             }
         }
 
-        // Callback-запросы (inline‑кнопки)
+        // Callback-запросы
         if (update.callback_query) {
             const query = update.callback_query;
             const chatId = query.message.chat.id;
             const data = query.data;
+            console.log(`Callback от ${chatId}: ${data}`);
 
             if (data === 'profile') {
                 await showProfile(chatId);
@@ -223,12 +225,18 @@ app.post('/webhook', async (req, res) => {
 
 // ---------- Вспомогательные функции ----------
 async function sendMessage(chatId, text, extra = {}) {
+    console.log(`sendMessage to ${chatId}: ${text}`);
     try {
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chat_id: chatId, text, ...extra })
         });
+        const data = await response.json();
+        console.log(`sendMessage result:`, data);
+        if (!data.ok) {
+            console.error('Ошибка отправки сообщения:', data);
+        }
     } catch (err) {
         console.error('sendMessage error:', err);
     }
