@@ -33,7 +33,8 @@ db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
 )`);
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_ID = process.env.ADMIN_ID;
+const ADMIN_ID = process.env.ADMIN_ID;      // сюда приходят уведомления о выводе
+const ADMIN_ID2 = process.env.ADMIN_ID2;    // имеет доступ к /addstars
 const WEBAPP_URL = process.env.WEBAPP_URL || 'https://your-netlify-app.netlify.app';
 
 if (!BOT_TOKEN) {
@@ -70,7 +71,7 @@ app.post('/webhook', async (req, res) => {
         const update = req.body;
         console.log('Update:', JSON.stringify(update).slice(0, 200));
 
-        // pre_checkout_query
+        // pre_checkout_query – обязательно для платежей
         if (update.pre_checkout_query) {
             const query = update.pre_checkout_query;
             await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerPreCheckoutQuery`, {
@@ -105,7 +106,7 @@ app.post('/webhook', async (req, res) => {
 
             if (text === '/start') {
                 console.log('Обработка /start');
-                await sendMessage(chatId, 'Добро пожаловать в казино БЕЗСКАНДАЛА!', {
+                await sendMessage(chatId, 'Добро пожаловать в БЕЗСКАНДАЛА!', {
                     reply_markup: {
                         keyboard: [
                             [{ text: '🎰 Начать играть', web_app: { url: WEBAPP_URL } }],
@@ -128,6 +129,33 @@ app.post('/webhook', async (req, res) => {
             if (text === '👤 Профиль') {
                 console.log('Обработка Профиль');
                 await showProfile(chatId);
+                return res.sendStatus(200);
+            }
+
+            // Команда /addstars – только для ADMIN_ID2
+            if (text.startsWith('/addstars')) {
+                const parts = text.split(' ');
+                if (parts.length !== 3) {
+                    await sendMessage(chatId, 'Используйте: /addstars [ID пользователя] [количество]');
+                    return res.sendStatus(200);
+                }
+                const targetUserId = parseInt(parts[1]);
+                const amount = parseInt(parts[2]);
+                if (isNaN(targetUserId) || isNaN(amount) || amount < 1) {
+                    await sendMessage(chatId, 'Неверный формат. Пример: /addstars 5350902324 100');
+                    return res.sendStatus(200);
+                }
+
+                // Проверяем права
+                if (String(chatId) !== String(ADMIN_ID2)) {
+                    await sendMessage(chatId, 'У вас нет прав для выполнения этой команды.');
+                    return res.sendStatus(200);
+                }
+
+                db.prepare('INSERT OR IGNORE INTO users (telegram_id, balance) VALUES (?, 0)').run(targetUserId);
+                db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, targetUserId);
+                const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(targetUserId);
+                await sendMessage(chatId, `✅ Пользователю ${targetUserId} начислено ${amount} ⭐. Текущий баланс: ${user.balance} ⭐`);
                 return res.sendStatus(200);
             }
 
@@ -185,6 +213,7 @@ app.post('/webhook', async (req, res) => {
                     db.prepare('INSERT INTO withdrawals (telegram_id, amount) VALUES (?, ?)').run(chatId, amount);
                     db.prepare('UPDATE users SET balance = balance - ? WHERE telegram_id = ?').run(amount, chatId);
                     await sendMessage(chatId, `✅ Заявка на вывод ${amount} ⭐ создана. Ожидайте подтверждения.`);
+                    // Уведомление на ADMIN_ID
                     if (ADMIN_ID) {
                         const username = query.from.username ? `@${query.from.username}` : query.from.first_name;
                         await sendMessage(
