@@ -46,16 +46,13 @@ app.get('/', (req, res) => res.send('OK'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 // ---------- API для Mini App ----------
-// Получить баланс (теперь всегда 0, если пользователя нет)
 app.get('/api/balance/:telegram_id', (req, res) => {
     const tid = req.params.telegram_id;
     const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(tid);
     const balance = user ? user.balance : 0;
-    console.log(`[GET /api/balance/${tid}] → ${balance}`);
     res.json({ balance });
 });
 
-// Обновить баланс (синхронизация после игр)
 app.post('/api/balance/:telegram_id', (req, res) => {
     const tid = req.params.telegram_id;
     const { balance } = req.body;
@@ -106,7 +103,7 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Команда /balance (быстрая проверка)
+            // Команда /balance
             if (text === '/balance') {
                 const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(chatId);
                 await sendMessage(chatId, `Ваш баланс: ${user ? user.balance : 0} ⭐`);
@@ -119,7 +116,7 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Пополнение: если пользователь отправил число
+            // Пополнение: если пользователь отправил число (>=1)
             const amount = parseInt(text);
             if (!isNaN(amount) && amount >= 1) {
                 await createInvoice(chatId, amount);
@@ -137,8 +134,22 @@ app.post('/webhook', async (req, res) => {
             if (data === 'profile') {
                 await showProfile(chatId);
                 await answerCallbackQuery(query.id);
+            } else if (data === 'topup') {
+                // Просим ввести сумму
+                await sendMessage(chatId, 'Введите сумму звёзд для пополнения (минимум 1):', {
+                    reply_markup: {
+                        keyboard: [
+                            [{ text: '10' }, { text: '25' }],
+                            [{ text: '50' }, { text: '100' }],
+                            [{ text: '200' }]
+                        ],
+                        resize_keyboard: true,
+                        one_time_keyboard: true
+                    }
+                });
+                await answerCallbackQuery(query.id);
             } else if (data === 'withdraw') {
-                // Показать клавиатуру с выбором суммы вывода
+                // Клавиатура с выбором суммы вывода
                 await sendMessage(chatId, 'Выберите сумму для вывода:', {
                     reply_markup: {
                         inline_keyboard: [
@@ -160,9 +171,7 @@ app.post('/webhook', async (req, res) => {
                     db.prepare('UPDATE users SET balance = balance - ? WHERE telegram_id = ?').run(amount, chatId);
                     await sendMessage(chatId, `✅ Заявка на вывод ${amount} ⭐ создана. Ожидайте подтверждения.`);
                     if (ADMIN_ID) {
-                        const username = update.callback_query.from.username
-                            ? `@${update.callback_query.from.username}`
-                            : update.callback_query.from.first_name;
+                        const username = query.from.username ? `@${query.from.username}` : query.from.first_name;
                         await sendMessage(
                             ADMIN_ID,
                             `📤 Новая заявка на вывод:\n` +
@@ -240,6 +249,7 @@ async function showProfile(chatId) {
     await sendMessage(chatId, text, {
         reply_markup: {
             inline_keyboard: [
+                [{ text: '💳 Пополнить', callback_data: 'topup' }],
                 [{ text: '💸 Вывести', callback_data: 'withdraw' }],
                 [{ text: '📋 История выводов', callback_data: 'history' }]
             ]
@@ -263,11 +273,9 @@ async function createInvoice(chatId, amount) {
         });
         const data = await response.json();
         if (data.ok) {
-            await sendMessage(chatId, `Счёт на ${amount} ⭐ готов: [Оплатить](${data.result})`, {
+            await sendMessage(chatId, `Счёт на ${amount} ⭐ готов:\n[Оплатить](${data.result})`, {
                 parse_mode: 'Markdown',
-                reply_markup: {
-                    inline_keyboard: [[{ text: `Оплатить ${amount} ⭐`, url: data.result }]]
-                }
+                disable_web_page_preview: true
             });
         } else {
             console.error('Invoice error:', data);
