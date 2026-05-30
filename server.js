@@ -33,6 +33,14 @@ db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
     status TEXT DEFAULT 'pending',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )`);
+db.exec(`CREATE TABLE IF NOT EXISTS promo_codes (
+    code TEXT PRIMARY KEY,
+    amount INTEGER NOT NULL,
+    created_by INTEGER NOT NULL,
+    max_uses INTEGER DEFAULT 1,
+    current_uses INTEGER DEFAULT 0,
+    users TEXT DEFAULT '[]'
+)`);
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = process.env.ADMIN_ID;      // уведомления о выводе
@@ -62,7 +70,6 @@ app.post('/api/balance/:telegram_id', (req, res) => {
     if (typeof balance !== 'number' || balance < 0) {
         return res.status(400).json({ error: 'Invalid balance' });
     }
-    // Сохраняем username и photo_url, если они переданы
     const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(tid);
     if (user) {
         db.prepare('UPDATE users SET balance = ?, username = COALESCE(?, username), photo_url = COALESCE(?, photo_url) WHERE telegram_id = ?')
@@ -71,11 +78,11 @@ app.post('/api/balance/:telegram_id', (req, res) => {
         db.prepare('INSERT INTO users (telegram_id, balance, username, photo_url) VALUES (?, ?, ?, ?)')
           .run(tid, balance, username || '', photo_url || '');
     }
-    console.log(`[POST /api/balance/${tid}] updated to ${balance}, username=${username}, photo_url=${photo_url}`);
+    console.log(`[POST /api/balance/${tid}] updated to ${balance}`);
     res.json({ success: true });
 });
 
-// Топ-10 игроков по балансу
+// Топ-10
 app.get('/api/top', (req, res) => {
     try {
         const top = db.prepare('SELECT telegram_id, balance, username, photo_url FROM users ORDER BY balance DESC LIMIT 10').all();
@@ -90,6 +97,29 @@ app.get('/api/top', (req, res) => {
         console.error('/api/top error:', err);
         res.status(500).json({ error: 'Internal error' });
     }
+});
+
+// Активация промокода
+app.post('/api/redeem-promo', (req, res) => {
+    const { telegram_id, code } = req.body;
+    if (!telegram_id || !code) return res.status(400).json({ error: 'Missing fields' });
+    const promo = db.prepare('SELECT * FROM promo_codes WHERE code = ?').get(code.toUpperCase());
+    if (!promo) return res.status(404).json({ error: 'Промокод не найден' });
+
+    let users = [];
+    try { users = JSON.parse(promo.users); } catch(e) {}
+    if (users.includes(telegram_id)) return res.status(400).json({ error: 'Вы уже использовали этот промокод' });
+    if (promo.max_uses > 0 && promo.current_uses >= promo.max_uses) return res.status(400).json({ error: 'Промокод больше не действителен' });
+
+    // Зачисляем звёзды
+    db.prepare('INSERT OR IGNORE INTO users (telegram_id, balance) VALUES (?, 0)').run(telegram_id);
+    db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(promo.amount, telegram_id);
+    // Обновляем использование
+    users.push(telegram_id);
+    db.prepare('UPDATE promo_codes SET current_uses = current_uses + 1, users = ? WHERE code = ?')
+      .run(JSON.stringify(users), promo.code);
+    console.log(`Промокод ${promo.code} активирован пользователем ${telegram_id}, начислено ${promo.amount} звёзд`);
+    res.json({ success: true, amount: promo.amount, message: `Промокод активирован! +${promo.amount} ⭐` });
 });
 
 // ---------- Вебхук Telegram ----------
@@ -155,7 +185,7 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Команда /addstars – только для ADMIN_ID2
+            // Команда /addstars
             if (text.startsWith('/addstars')) {
                 const parts = text.split(' ');
                 if (parts.length !== 3) {
@@ -178,6 +208,36 @@ app.post('/webhook', async (req, res) => {
                 db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, targetUserId);
                 const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(targetUserId);
                 await sendMessage(chatId, `✅ Пользователю ${targetUserId} начислено ${amount} ⭐. Текущий баланс: ${user.balance} ⭐`);
+                return res.sendStatus(200);
+            }
+
+            // Команда /promo – создание промокода (доступно ADMIN_ID и ADMIN_ID2)
+            if (text.startsWith('/promo')) {
+                const parts = text.split(' ');
+                if (parts.length !== 3) {
+                    await sendMessage(chatId, 'Используйте: /promo КОД СУММА');
+                    return res.sendStatus(200);
+                }
+                const code = parts[1].toUpperCase();
+                const amount = parseInt(parts[2]);
+                if (isNaN(amount) || amount < 1) {
+                    await sendMessage(chatId, 'Неверная сумма');
+                    return res.sendStatus(200);
+                }
+                if (String(chatId) !== String(ADMIN_ID) && String(chatId) !== String(ADMIN_ID2)) {
+                    await sendMessage(chatId, 'У вас нет прав для создания промокодов.');
+                    return res.sendStatus(200);
+                }
+                try {
+                    db.prepare('INSERT INTO promo_codes (code, amount, created_by) VALUES (?, ?, ?)').run(code, amount, chatId);
+                    await sendMessage(chatId, `✅ Промокод ${code} создан на ${amount} ⭐`);
+                } catch (err) {
+                    if (err.message.includes('UNIQUE constraint')) {
+                        await sendMessage(chatId, 'Такой промокод уже существует');
+                    } else {
+                        throw err;
+                    }
+                }
                 return res.sendStatus(200);
             }
 
