@@ -22,7 +22,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS users (
     balance INTEGER DEFAULT 0,
     level INTEGER DEFAULT 1,
     xp INTEGER DEFAULT 0,
-    xp_next INTEGER DEFAULT 100
+    xp_next INTEGER DEFAULT 100,
+    username TEXT DEFAULT '',
+    photo_url TEXT DEFAULT ''
 )`);
 db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,24 +58,32 @@ app.get('/api/balance/:telegram_id', (req, res) => {
 
 app.post('/api/balance/:telegram_id', (req, res) => {
     const tid = req.params.telegram_id;
-    const { balance } = req.body;
+    const { balance, username, photo_url } = req.body;
     if (typeof balance !== 'number' || balance < 0) {
         return res.status(400).json({ error: 'Invalid balance' });
     }
-    db.prepare('INSERT OR REPLACE INTO users (telegram_id, balance) VALUES (?, ?)').run(tid, balance);
-    console.log(`[POST /api/balance/${tid}] updated to ${balance}`);
+    // Сохраняем username и photo_url, если они переданы
+    const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(tid);
+    if (user) {
+        db.prepare('UPDATE users SET balance = ?, username = COALESCE(?, username), photo_url = COALESCE(?, photo_url) WHERE telegram_id = ?')
+          .run(balance, username, photo_url, tid);
+    } else {
+        db.prepare('INSERT INTO users (telegram_id, balance, username, photo_url) VALUES (?, ?, ?, ?)')
+          .run(tid, balance, username || '', photo_url || '');
+    }
+    console.log(`[POST /api/balance/${tid}] updated to ${balance}, username=${username}, photo_url=${photo_url}`);
     res.json({ success: true });
 });
 
 // Топ-10 игроков по балансу
 app.get('/api/top', (req, res) => {
     try {
-        const top = db.prepare('SELECT telegram_id, balance FROM users ORDER BY balance DESC LIMIT 10').all();
-        // Анонимизируем: показываем только часть ID
+        const top = db.prepare('SELECT telegram_id, balance, username, photo_url FROM users ORDER BY balance DESC LIMIT 10').all();
         const result = top.map(u => ({
             id: u.telegram_id,
-            displayId: 'ID' + String(u.telegram_id).slice(-4),
-            balance: u.balance
+            username: u.username || ('ID' + String(u.telegram_id).slice(-4)),
+            balance: u.balance,
+            photo_url: u.photo_url || ''
         }));
         res.json(result);
     } catch (err) {
