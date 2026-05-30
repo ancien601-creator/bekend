@@ -71,7 +71,7 @@ app.post('/webhook', async (req, res) => {
         const update = req.body;
         console.log('Update:', JSON.stringify(update).slice(0, 200));
 
-        // pre_checkout_query – обязательно для платежей
+        // pre_checkout_query
         if (update.pre_checkout_query) {
             const query = update.pre_checkout_query;
             await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerPreCheckoutQuery`, {
