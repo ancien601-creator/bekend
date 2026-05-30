@@ -25,9 +25,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS users (
     xp_next INTEGER DEFAULT 100,
     username TEXT DEFAULT '',
     photo_url TEXT DEFAULT '',
-    referrer_id INTEGER DEFAULT NULL,
-    referrals_count INTEGER DEFAULT 0,
-    referral_case_used INTEGER DEFAULT 0
+    referrer_id INTEGER DEFAULT NULL
 )`);
 db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,6 +40,16 @@ db.exec(`CREATE TABLE IF NOT EXISTS promocodes (
     created_by INTEGER,
     used INTEGER DEFAULT 0
 )`);
+db.exec(`CREATE TABLE IF NOT EXISTS referrals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    referrer_id INTEGER NOT NULL,
+    referred_id INTEGER NOT NULL UNIQUE,
+    bonus_given INTEGER DEFAULT 0
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS bonus_cases (
+    user_id INTEGER PRIMARY KEY,
+    opened INTEGER DEFAULT 0
+)`);
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = process.env.ADMIN_ID;      // уведомления о выводе
@@ -49,7 +57,7 @@ const ADMIN_ID2 = process.env.ADMIN_ID2;    // команды /addstars и /crea
 const WEBAPP_URL = process.env.WEBAPP_URL || 'https://your-netlify-app.netlify.app';
 
 if (!BOT_TOKEN) {
-    console.error('BOT_TOKEN не установлен!');
+    console.error('BOT_TOKEN is not set!');
     process.exit(1);
 }
 
@@ -61,14 +69,15 @@ app.get('/health', (req, res) => res.status(200).send('OK'));
 app.get('/api/balance/:telegram_id', (req, res) => {
     const tid = req.params.telegram_id;
     const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(tid);
-    res.json({ balance: user ? user.balance : 0 });
+    const balance = user ? user.balance : 0;
+    res.json({ balance });
 });
 
 app.post('/api/balance/:telegram_id', (req, res) => {
     const tid = req.params.telegram_id;
     const { balance, username, photo_url } = req.body;
     if (typeof balance !== 'number' || balance < 0) {
-        return res.status(400).json({ error: 'Неверный баланс' });
+        return res.status(400).json({ error: 'Invalid balance' });
     }
     const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(tid);
     if (user) {
@@ -78,11 +87,11 @@ app.post('/api/balance/:telegram_id', (req, res) => {
         db.prepare('INSERT INTO users (telegram_id, balance, username, photo_url) VALUES (?, ?, ?, ?)')
           .run(tid, balance, username || '', photo_url || '');
     }
-    console.log(`[POST /api/balance/${tid}] обновлён до ${balance}, username=${username}, photo_url=${photo_url}`);
+    console.log(`[POST /api/balance/${tid}] updated to ${balance}`);
     res.json({ success: true });
 });
 
-// Топ-10 игроков по балансу
+// Топ-10
 app.get('/api/top', (req, res) => {
     try {
         const top = db.prepare('SELECT telegram_id, balance, username, photo_url FROM users ORDER BY balance DESC LIMIT 10').all();
@@ -94,54 +103,55 @@ app.get('/api/top', (req, res) => {
         }));
         res.json(result);
     } catch (err) {
-        console.error('/api/top ошибка:', err);
-        res.status(500).json({ error: 'Внутренняя ошибка' });
+        console.error('/api/top error:', err);
+        res.status(500).json({ error: 'Internal error' });
     }
 });
 
-// Данные реферальной системы для Mini App
+// Рефералы
 app.get('/api/referral/:telegram_id', (req, res) => {
     const tid = req.params.telegram_id;
-    const user = db.prepare('SELECT referrals_count, referral_case_used, referrer_id FROM users WHERE telegram_id = ?').get(tid);
-    if (!user) return res.json({ referrals: 0, caseUsed: false, referrer: null });
-    res.json({ referrals: user.referrals_count || 0, caseUsed: !!user.referral_case_used, referrer: user.referrer_id });
+    const count = db.prepare('SELECT COUNT(*) as cnt FROM referrals WHERE referrer_id = ?').get(tid);
+    const earnings = db.prepare('SELECT COALESCE(SUM(amount),0) as total FROM referrals r JOIN users u ON r.referred_id = u.telegram_id WHERE r.referrer_id = ?').get(tid);
+    const bonusCase = db.prepare('SELECT opened FROM bonus_cases WHERE user_id = ?').get(tid);
+    res.json({
+        refCount: count ? count.cnt : 0,
+        refEarnings: earnings ? earnings.total : 0,
+        bonusCaseOpened: bonusCase ? bonusCase.opened === 1 : false
+    });
 });
 
-// Открытие реферального кейса (проверка на MiniApp)
-app.post('/api/referral-case/:telegram_id', (req, res) => {
+// Бонусный кейс за рефералов
+app.post('/api/bonus-case/:telegram_id', (req, res) => {
     const tid = req.params.telegram_id;
-    const user = db.prepare('SELECT referrals_count, referral_case_used FROM users WHERE telegram_id = ?').get(tid);
-    if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
-    if (user.referrals_count < 2) return res.status(400).json({ error: 'Нужно минимум 2 реферала' });
-    if (user.referral_case_used) return res.status(400).json({ error: 'Кейс уже открыт' });
-
-    // Возможные награды (звёзды или предметы)
-    const rewards = [
-        { type: 'stars', amount: 50, emoji: '⭐', text: '50 звёзд' },
-        { type: 'stars', amount: 100, emoji: '⭐', text: '100 звёзд' },
-        { type: 'gift', name: 'Алмаз', emoji: '💎', price: 100 },
-        { type: 'gift', name: 'Кольцо', emoji: '💍', price: 100 },
-        { type: 'gift', name: 'Осколок звезды', emoji: '🌟', price: 200 },
-        { type: 'nothing', emoji: '😞', text: 'Ничего' }
-    ];
-    const reward = rewards[Math.floor(Math.random() * rewards.length)];
-
-    // Помечаем кейс использованным
-    db.prepare('UPDATE users SET referral_case_used = 1 WHERE telegram_id = ?').run(tid);
-
-    // Выдаём награду
-    if (reward.type === 'stars') {
-        db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(reward.amount, tid);
-        const updated = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(tid);
-        return res.json({ success: true, reward: { type: 'stars', amount: reward.amount, emoji: reward.emoji, text: reward.text }, balance: updated.balance });
-    } else if (reward.type === 'gift') {
-        // Здесь можно добавить предмет в инвентарь через отдельную таблицу, но пока просто даём звёзды равные цене
-        db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(reward.price, tid);
-        const updated = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(tid);
-        return res.json({ success: true, reward: { type: 'gift', name: reward.name, emoji: reward.emoji, price: reward.price, text: reward.name + ' (⭐' + reward.price + ')' }, balance: updated.balance });
-    } else {
-        return res.json({ success: true, reward: { type: 'nothing', emoji: reward.emoji, text: reward.text }, balance: user.balance });
+    const refCount = db.prepare('SELECT COUNT(*) as cnt FROM referrals WHERE referrer_id = ?').get(tid);
+    if (!refCount || refCount.cnt < 2) {
+        return res.json({ success: false, error: 'Недостаточно рефералов' });
     }
+    const already = db.prepare('SELECT opened FROM bonus_cases WHERE user_id = ?').get(tid);
+    if (already && already.opened === 1) {
+        return res.json({ success: false, error: 'Бонусный кейс уже открыт' });
+    }
+    // случайная награда 10-50 звёзд
+    const reward = Math.floor(Math.random() * 41) + 10;
+    db.prepare('INSERT OR REPLACE INTO bonus_cases (user_id, opened) VALUES (?, 1)').run(tid);
+    db.prepare('INSERT OR IGNORE INTO users (telegram_id, balance) VALUES (?, 0)').run(tid);
+    db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(reward, tid);
+    res.json({ success: true, reward });
+});
+
+// Активация промокода
+app.post('/api/activate-promo', (req, res) => {
+    const { userId, code } = req.body;
+    if (!userId || !code) return res.status(400).json({ success: false, error: 'Нет данных' });
+    const promo = db.prepare('SELECT * FROM promocodes WHERE code = ? AND used = 0').get(code.toUpperCase());
+    if (!promo) {
+        return res.json({ success: false, error: 'Неверный или использованный промокод' });
+    }
+    db.prepare('UPDATE promocodes SET used = 1 WHERE code = ?').run(code.toUpperCase());
+    db.prepare('INSERT OR IGNORE INTO users (telegram_id, balance) VALUES (?, 0)').run(userId);
+    db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(promo.amount, userId);
+    res.json({ success: true, amount: promo.amount });
 });
 
 // ---------- Вебхук Telegram ----------
@@ -173,13 +183,16 @@ app.post('/webhook', async (req, res) => {
                 const user = db.prepare('SELECT balance, referrer_id FROM users WHERE telegram_id = ?').get(userId);
                 console.log(`Пользователь ${userId} пополнил баланс на ${amount} звёзд, текущий баланс: ${user.balance}`);
 
-                // Начисляем 30% рефереру, если он есть
-                if (user.referrer_id) {
-                    const referralBonus = Math.floor(amount * 0.3);
-                    if (referralBonus > 0) {
-                        db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(referralBonus, user.referrer_id);
-                        console.log(`Реферер ${user.referrer_id} получил ${referralBonus} звёзд за пополнение реферала ${userId}`);
-                        await sendMessage(user.referrer_id, `🎉 Ваш реферал пополнил баланс на ${amount} ⭐! Вы получили ${referralBonus} ⭐ (30%).`);
+                // Реферальное вознаграждение (30%)
+                if (user && user.referrer_id) {
+                    const bonus = Math.floor(amount * 0.3);
+                    if (bonus > 0) {
+                        db.prepare('INSERT OR IGNORE INTO users (telegram_id, balance) VALUES (?, 0)').run(user.referrer_id);
+                        db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(bonus, user.referrer_id);
+                        console.log(`Рефереру ${user.referrer_id} начислен бонус ${bonus} звёзд`);
+                        // Обновляем сумму заработка в referrals (условно)
+                        db.prepare('UPDATE referrals SET amount = COALESCE(amount,0) + ? WHERE referred_id = ? AND referrer_id = ?')
+                            .run(bonus, userId, user.referrer_id);
                     }
                 }
                 await sendMessage(userId, `✅ Ваш баланс пополнен на ${amount} ⭐. Текущий баланс: ${user.balance} ⭐`);
@@ -193,33 +206,31 @@ app.post('/webhook', async (req, res) => {
             const text = update.message.text.trim();
             console.log(`Получено сообщение от ${chatId}: "${text}"`);
 
-            // Обработка /start с параметром (реферальная ссылка)
-            if (text.startsWith('/start')) {
-                const parts = text.split(' ');
-                let referrerId = null;
-                if (parts.length > 1) {
-                    referrerId = parseInt(parts[1]);
-                }
-
-                // Если это новый пользователь и он перешёл по реферальной ссылке
-                if (referrerId && referrerId !== chatId) {
-                    const existing = db.prepare('SELECT referrer_id FROM users WHERE telegram_id = ?').get(chatId);
-                    if (!existing || !existing.referrer_id) {
-                        // Устанавливаем реферера
-                        db.prepare('UPDATE users SET referrer_id = ? WHERE telegram_id = ?').run(referrerId, chatId);
-                        // Увеличиваем счётчик рефералов у реферера
-                        db.prepare('UPDATE users SET referrals_count = referrals_count + 1 WHERE telegram_id = ?').run(referrerId);
-                        console.log(`Пользователь ${chatId} присоединился по реферальной ссылке от ${referrerId}`);
-                        await sendMessage(referrerId, `🎉 По вашей ссылке присоединился новый пользователь! У вас теперь +1 реферал.`);
+            // Обработка реферальной ссылки /start ref123456
+            if (text.startsWith('/start ref')) {
+                const refId = parseInt(text.replace('/start ref', '').trim());
+                if (!isNaN(refId) && refId !== chatId) {
+                    // Записываем реферала, если он ещё не существует
+                    const exists = db.prepare('SELECT telegram_id FROM users WHERE telegram_id = ?').get(chatId);
+                    if (!exists) {
+                        db.prepare('INSERT INTO users (telegram_id, balance, referrer_id) VALUES (?, 0, ?)').run(chatId, refId);
+                    } else {
+                        // Если пользователь уже есть, обновляем реферера (если ещё не назначен)
+                        const currentRef = db.prepare('SELECT referrer_id FROM users WHERE telegram_id = ?').get(chatId);
+                        if (!currentRef || !currentRef.referrer_id) {
+                            db.prepare('UPDATE users SET referrer_id = ? WHERE telegram_id = ?').run(refId, chatId);
+                        }
                     }
+                    // Добавляем запись в таблицу referrals
+                    db.prepare('INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES (?, ?)').run(refId, chatId);
+                    console.log(`Пользователь ${chatId} зарегистрирован по реферальной ссылке от ${refId}`);
                 }
-
-                await sendMessage(chatId, '👑 Добро пожаловать в ZORA IMPERIAL!\n\n🎰 Здесь ты можешь открывать кейсы, играть в мини-игры и зарабатывать звёзды Telegram.\n👥 Приглашай друзей и получай 30% от их пополнений!', {
+                // Показываем приветственное сообщение
+                await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
                     reply_markup: {
                         keyboard: [
-                            [{ text: '🎰 Играть', web_app: { url: WEBAPP_URL } }],
-                            [{ text: '👤 Профиль' }, { text: '🔗 Реферальная ссылка' }],
-                            [{ text: '🏆 Топ' }, { text: '❓ Помощь' }]
+                            [{ text: '🎰 Начать играть', web_app: { url: WEBAPP_URL } }],
+                            [{ text: '👤 Профиль' }]
                         ],
                         resize_keyboard: true,
                         one_time_keyboard: false
@@ -228,17 +239,17 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            if (text === '❓ Помощь') {
-                const helpText = `🆘 <b>Помощь по командам:</b>\n\n` +
-                    `/balance – ваш баланс\n` +
-                    `/level – ваш уровень и опыт\n` +
-                    `/activate [код] – активировать промокод\n` +
-                    `👤 Профиль – управление балансом\n` +
-                    `🔗 Реферальная ссылка – пригласить друга и получать 30% от его пополнений\n` +
-                    `🎰 Играть – запустить MiniApp\n` +
-                    `🏆 Топ – список лидеров\n\n` +
-                    `По всем вопросам: @Vados4433`;
-                await sendMessage(chatId, helpText, { parse_mode: 'HTML' });
+            if (text === '/start') {
+                await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
+                    reply_markup: {
+                        keyboard: [
+                            [{ text: '🎰 Начать играть', web_app: { url: WEBAPP_URL } }],
+                            [{ text: '👤 Профиль' }]
+                        ],
+                        resize_keyboard: true,
+                        one_time_keyboard: false
+                    }
+                });
                 return res.sendStatus(200);
             }
 
@@ -248,38 +259,8 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            if (text === '/level') {
-                const user = db.prepare('SELECT level, xp, xp_next FROM users WHERE telegram_id = ?').get(chatId);
-                if (user) {
-                    await sendMessage(chatId, `🎚 Ваш уровень: ${user.level}\n🔹 Опыт: ${user.xp}/${user.xp_next}`);
-                } else {
-                    await sendMessage(chatId, 'Ваш уровень: 1\n🔹 Опыт: 0/100');
-                }
-                return res.sendStatus(200);
-            }
-
             if (text === '👤 Профиль') {
                 await showProfile(chatId);
-                return res.sendStatus(200);
-            }
-
-            if (text === '🔗 Реферальная ссылка') {
-                const link = `https://t.me/${(await (await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`)).json()).result.username}?start=${chatId}`;
-                const user = db.prepare('SELECT referrals_count FROM users WHERE telegram_id = ?').get(chatId);
-                const count = user ? user.referrals_count : 0;
-                await sendMessage(chatId, `🔗 Ваша реферальная ссылка:\n${link}\n\n👥 Приглашено: ${count}\n💰 Вы получаете 30% от пополнений приглашённых пользователей!\n🎁 За двух приглашённых – специальный кейс!`, { disable_web_page_preview: true });
-                return res.sendStatus(200);
-            }
-
-            if (text === '🏆 Топ') {
-                const top = db.prepare('SELECT telegram_id, balance, username FROM users ORDER BY balance DESC LIMIT 10').all();
-                let topText = '🏆 <b>Топ игроков:</b>\n\n';
-                top.forEach((u, i) => {
-                    const name = u.username || ('ID' + String(u.telegram_id).slice(-4));
-                    topText += `${i+1}. ${name} – ${u.balance} ⭐\n`;
-                });
-                if (top.length === 0) topText += 'Пока никто не играл.';
-                await sendMessage(chatId, topText, { parse_mode: 'HTML' });
                 return res.sendStatus(200);
             }
 
@@ -335,7 +316,7 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Команда /activate – активация промокода
+            // Команда /activate – активация промокода (запасной вариант)
             if (text.startsWith('/activate')) {
                 const parts = text.split(' ');
                 if (parts.length !== 2) {
@@ -430,106 +411,4 @@ app.post('/webhook', async (req, res) => {
                     withdrawals.forEach(w => {
                         const date = new Date(w.created_at).toLocaleString();
                         text += `• ${w.amount} ⭐ (${w.status}) — ${date}\n`;
-                    });
-                    await sendMessage(chatId, text);
-                }
-                await answerCallbackQuery(query.id);
-            }
-            return res.sendStatus(200);
-        }
-
-        res.sendStatus(200);
-    } catch (e) {
-        console.error('Webhook ошибка:', e);
-        res.sendStatus(500);
-    }
-});
-
-// ---------- Вспомогательные функции ----------
-async function sendMessage(chatId, text, extra = {}) {
-    try {
-        const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, text, ...extra })
-        });
-        const data = await response.json();
-        if (!data.ok) {
-            console.error('Ошибка отправки:', data);
-        }
-    } catch (err) {
-        console.error('sendMessage ошибка:', err);
-    }
-}
-
-async function answerCallbackQuery(callbackQueryId) {
-    try {
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ callback_query_id: callbackQueryId })
-        });
-    } catch (err) {
-        console.error('answerCallbackQuery ошибка:', err);
-    }
-}
-
-async function showProfile(chatId) {
-    const user = db.prepare('SELECT balance, level, xp, xp_next, referrals_count, referrer_id FROM users WHERE telegram_id = ?').get(chatId);
-    const balance = user ? user.balance : 0;
-    const level = user ? user.level : 1;
-    const xp = user ? user.xp : 0;
-    const xpNext = user ? user.xp_next : 100;
-    const refCount = user ? user.referrals_count : 0;
-
-    const text = `👤 <b>Ваш профиль:</b>\n\n` +
-                 `⭐ Баланс: ${balance}\n` +
-                 `🎚 Уровень: ${level}\n` +
-                 `🔹 Опыт: ${xp}/${xpNext}\n` +
-                 `👥 Рефералов: ${refCount}\n` +
-                 `💰 Бонус за реферала: 30% от пополнения`;
-
-    await sendMessage(chatId, text, {
-        parse_mode: 'HTML',
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: '💳 Пополнить', callback_data: 'topup' }],
-                [{ text: '💸 Вывести', callback_data: 'withdraw' }],
-                [{ text: '📋 История выводов', callback_data: 'history' }]
-            ]
-        }
-    });
-}
-
-async function createInvoice(chatId, amount) {
-    try {
-        const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                title: 'Пополнение звёзд',
-                description: `Покупка ${amount} Telegram Stars`,
-                payload: `stars_${chatId}_${amount}`,
-                provider_token: '',
-                currency: 'XTR',
-                prices: [{ label: 'Звёзды', amount: amount }]
-            })
-        });
-        const data = await response.json();
-        if (data.ok) {
-            await sendMessage(chatId, `Счёт на ${amount} ⭐ готов:\n[Оплатить](${data.result})`, {
-                parse_mode: 'Markdown',
-                disable_web_page_preview: true
-            });
-        } else {
-            console.error('Ошибка создания счёта:', data);
-            await sendMessage(chatId, 'Ошибка создания счёта. Попробуйте позже.');
-        }
-    } catch (err) {
-        console.error('createInvoice ошибка:', err);
-    }
-}
-
-// ---------- Запуск ----------
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`Бэкенд запущен на порту ${PORT}`));
+                
