@@ -33,8 +33,8 @@ db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
 )`);
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_ID = process.env.ADMIN_ID;      // сюда приходят уведомления о выводе
-const ADMIN_ID2 = process.env.ADMIN_ID2;    // имеет доступ к /addstars
+const ADMIN_ID = process.env.ADMIN_ID;      // уведомления о выводе
+const ADMIN_ID2 = process.env.ADMIN_ID2;    // команда /addstars
 const WEBAPP_URL = process.env.WEBAPP_URL || 'https://your-netlify-app.netlify.app';
 
 if (!BOT_TOKEN) {
@@ -105,8 +105,7 @@ app.post('/webhook', async (req, res) => {
             console.log(`Получено сообщение от ${chatId}: "${text}"`);
 
             if (text === '/start') {
-                console.log('Обработка /start');
-                await sendMessage(chatId, 'Добро пожаловать в БЕЗСКАНДАЛА!', {
+                await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
                     reply_markup: {
                         keyboard: [
                             [{ text: '🎰 Начать играть', web_app: { url: WEBAPP_URL } }],
@@ -120,14 +119,12 @@ app.post('/webhook', async (req, res) => {
             }
 
             if (text === '/balance') {
-                console.log('Обработка /balance');
                 const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(chatId);
                 await sendMessage(chatId, `Ваш баланс: ${user ? user.balance : 0} ⭐`);
                 return res.sendStatus(200);
             }
 
             if (text === '👤 Профиль') {
-                console.log('Обработка Профиль');
                 await showProfile(chatId);
                 return res.sendStatus(200);
             }
@@ -146,7 +143,6 @@ app.post('/webhook', async (req, res) => {
                     return res.sendStatus(200);
                 }
 
-                // Проверяем права
                 if (String(chatId) !== String(ADMIN_ID2)) {
                     await sendMessage(chatId, 'У вас нет прав для выполнения этой команды.');
                     return res.sendStatus(200);
@@ -161,10 +157,8 @@ app.post('/webhook', async (req, res) => {
 
             const amount = parseInt(text);
             if (!isNaN(amount) && amount >= 1) {
-                console.log('Пополнение на', amount);
                 await createInvoice(chatId, amount);
             } else {
-                console.log('Неизвестная команда');
                 await sendMessage(chatId, 'Используйте кнопки меню.');
             }
         }
@@ -213,7 +207,6 @@ app.post('/webhook', async (req, res) => {
                     db.prepare('INSERT INTO withdrawals (telegram_id, amount) VALUES (?, ?)').run(chatId, amount);
                     db.prepare('UPDATE users SET balance = balance - ? WHERE telegram_id = ?').run(amount, chatId);
                     await sendMessage(chatId, `✅ Заявка на вывод ${amount} ⭐ создана. Ожидайте подтверждения.`);
-                    // Уведомление на ADMIN_ID
                     if (ADMIN_ID) {
                         const username = query.from.username ? `@${query.from.username}` : query.from.first_name;
                         await sendMessage(
@@ -254,7 +247,6 @@ app.post('/webhook', async (req, res) => {
 
 // ---------- Вспомогательные функции ----------
 async function sendMessage(chatId, text, extra = {}) {
-    console.log(`sendMessage to ${chatId}: ${text}`);
     try {
         const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
             method: 'POST',
@@ -262,9 +254,8 @@ async function sendMessage(chatId, text, extra = {}) {
             body: JSON.stringify({ chat_id: chatId, text, ...extra })
         });
         const data = await response.json();
-        console.log(`sendMessage result:`, data);
         if (!data.ok) {
-            console.error('Ошибка отправки сообщения:', data);
+            console.error('Ошибка отправки:', data);
         }
     } catch (err) {
         console.error('sendMessage error:', err);
