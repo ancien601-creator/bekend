@@ -15,7 +15,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// ---------- База данных ----------
+// ---------- База даних ----------
 const db = new Database('users.db');
 db.exec(`CREATE TABLE IF NOT EXISTS users (
     telegram_id INTEGER PRIMARY KEY,
@@ -33,18 +33,21 @@ db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
     status TEXT DEFAULT 'pending',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )`);
-db.exec(`CREATE TABLE IF NOT EXISTS promo_codes (
+db.exec(`CREATE TABLE IF NOT EXISTS promocodes (
     code TEXT PRIMARY KEY,
     amount INTEGER NOT NULL,
-    created_by INTEGER NOT NULL,
-    max_uses INTEGER DEFAULT 1,
-    current_uses INTEGER DEFAULT 0,
-    users TEXT DEFAULT '[]'
+    created_by INTEGER,
+    used_count INTEGER DEFAULT 0,
+    max_uses INTEGER DEFAULT 1
 )`);
+
+// Міграція для старих таблиць (якщо поля ще не додано)
+try { db.exec('ALTER TABLE promocodes ADD COLUMN used_count INTEGER DEFAULT 0'); } catch(e) {}
+try { db.exec('ALTER TABLE promocodes ADD COLUMN max_uses INTEGER DEFAULT 1'); } catch(e) {}
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = process.env.ADMIN_ID;      // уведомления о выводе
-const ADMIN_ID2 = process.env.ADMIN_ID2;    // команда /addstars
+const ADMIN_ID2 = process.env.ADMIN_ID2;    // команды /addstars и /createpromo
 const WEBAPP_URL = process.env.WEBAPP_URL || 'https://your-netlify-app.netlify.app';
 
 if (!BOT_TOKEN) {
@@ -52,7 +55,7 @@ if (!BOT_TOKEN) {
     process.exit(1);
 }
 
-// ---------- Здоровье ----------
+// ---------- Здоров'я ----------
 app.get('/', (req, res) => res.send('OK'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
@@ -78,11 +81,11 @@ app.post('/api/balance/:telegram_id', (req, res) => {
         db.prepare('INSERT INTO users (telegram_id, balance, username, photo_url) VALUES (?, ?, ?, ?)')
           .run(tid, balance, username || '', photo_url || '');
     }
-    console.log(`[POST /api/balance/${tid}] updated to ${balance}`);
+    console.log(`[POST /api/balance/${tid}] updated to ${balance}, username=${username}, photo_url=${photo_url}`);
     res.json({ success: true });
 });
 
-// Топ-10
+// Топ-10 гравців за балансом
 app.get('/api/top', (req, res) => {
     try {
         const top = db.prepare('SELECT telegram_id, balance, username, photo_url FROM users ORDER BY balance DESC LIMIT 10').all();
@@ -99,27 +102,23 @@ app.get('/api/top', (req, res) => {
     }
 });
 
-// Активация промокода
-app.post('/api/redeem-promo', (req, res) => {
+// Активація промокоду з Mini App
+app.post('/api/activate', (req, res) => {
     const { telegram_id, code } = req.body;
-    if (!telegram_id || !code) return res.status(400).json({ error: 'Missing fields' });
-    const promo = db.prepare('SELECT * FROM promo_codes WHERE code = ?').get(code.toUpperCase());
-    if (!promo) return res.status(404).json({ error: 'Промокод не найден' });
-
-    let users = [];
-    try { users = JSON.parse(promo.users); } catch(e) {}
-    if (users.includes(telegram_id)) return res.status(400).json({ error: 'Вы уже использовали этот промокод' });
-    if (promo.max_uses > 0 && promo.current_uses >= promo.max_uses) return res.status(400).json({ error: 'Промокод больше не действителен' });
-
-    // Зачисляем звёзды
+    if (!telegram_id || !code) {
+        return res.status(400).json({ error: 'telegram_id та code обов’язкові' });
+    }
+    const promo = db.prepare('SELECT * FROM promocodes WHERE code = ? AND used_count < max_uses').get(code.toUpperCase());
+    if (!promo) {
+        return res.status(404).json({ error: 'Промокод не знайдено або він уже вичерпаний' });
+    }
+    // Нараховуємо зірки
     db.prepare('INSERT OR IGNORE INTO users (telegram_id, balance) VALUES (?, 0)').run(telegram_id);
     db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(promo.amount, telegram_id);
-    // Обновляем использование
-    users.push(telegram_id);
-    db.prepare('UPDATE promo_codes SET current_uses = current_uses + 1, users = ? WHERE code = ?')
-      .run(JSON.stringify(users), promo.code);
-    console.log(`Промокод ${promo.code} активирован пользователем ${telegram_id}, начислено ${promo.amount} звёзд`);
-    res.json({ success: true, amount: promo.amount, message: `Промокод активирован! +${promo.amount} ⭐` });
+    db.prepare('UPDATE promocodes SET used_count = used_count + 1 WHERE code = ?').run(code.toUpperCase());
+    const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(telegram_id);
+    console.log(`Промокод ${code} активовано користувачем ${telegram_id}. Отримано ${promo.amount} ⭐`);
+    res.json({ success: true, amount: promo.amount, balance: user.balance });
 });
 
 // ---------- Вебхук Telegram ----------
@@ -139,7 +138,7 @@ app.post('/webhook', async (req, res) => {
             return res.sendStatus(200);
         }
 
-        // Успешный платёж
+        // Успішний платіж
         if (update.message?.successful_payment) {
             const payload = update.message.successful_payment.invoice_payload;
             const match = payload.match(/^stars_(\d+)_(\d+)$/);
@@ -155,10 +154,11 @@ app.post('/webhook', async (req, res) => {
             return res.sendStatus(200);
         }
 
-        // Текстовые сообщения
+        // Текстові повідомлення
         if (update.message?.text) {
             const chatId = update.message.chat.id;
             const text = update.message.text.trim();
+            console.log(`Получено сообщение от ${chatId}: "${text}"`);
 
             if (text === '/start') {
                 await sendMessage(chatId, 'Добро пожаловать в ZORA IMPERIAL!', {
@@ -185,7 +185,7 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Команда /addstars
+            // Команда /addstars – тільки для ADMIN_ID2
             if (text.startsWith('/addstars')) {
                 const parts = text.split(' ');
                 if (parts.length !== 3) {
@@ -211,33 +211,51 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Команда /promo – создание промокода (доступно ADMIN_ID и ADMIN_ID2)
-            if (text.startsWith('/promo')) {
+            // Команда /createpromo – тільки для ADMIN_ID2, тепер з кількістю активацій
+            if (text.startsWith('/createpromo')) {
                 const parts = text.split(' ');
-                if (parts.length !== 3) {
-                    await sendMessage(chatId, 'Используйте: /promo КОД СУММА');
+                if (parts.length < 3) {
+                    await sendMessage(chatId, 'Используйте: /createpromo [код] [сумма] [кол-во активаций (опционально)]');
                     return res.sendStatus(200);
                 }
                 const code = parts[1].toUpperCase();
                 const amount = parseInt(parts[2]);
-                if (isNaN(amount) || amount < 1) {
-                    await sendMessage(chatId, 'Неверная сумма');
+                const maxUses = parts[3] ? parseInt(parts[3]) : 1;
+                if (isNaN(amount) || amount < 1 || maxUses < 1) {
+                    await sendMessage(chatId, 'Неверная сумма или число активаций. Пример: /createpromo SUPER 50 5');
                     return res.sendStatus(200);
                 }
-                if (String(chatId) !== String(ADMIN_ID) && String(chatId) !== String(ADMIN_ID2)) {
+                if (String(chatId) !== String(ADMIN_ID2)) {
                     await sendMessage(chatId, 'У вас нет прав для создания промокодов.');
                     return res.sendStatus(200);
                 }
                 try {
-                    db.prepare('INSERT INTO promo_codes (code, amount, created_by) VALUES (?, ?, ?)').run(code, amount, chatId);
-                    await sendMessage(chatId, `✅ Промокод ${code} создан на ${amount} ⭐`);
+                    db.prepare('INSERT INTO promocodes (code, amount, created_by, max_uses) VALUES (?, ?, ?, ?)').run(code, amount, chatId, maxUses);
+                    await sendMessage(chatId, `✅ Промокод ${code} на ${amount} ⭐ создан! Макс. активаций: ${maxUses}`);
                 } catch (err) {
-                    if (err.message.includes('UNIQUE constraint')) {
-                        await sendMessage(chatId, 'Такой промокод уже существует');
-                    } else {
-                        throw err;
-                    }
+                    await sendMessage(chatId, '❌ Ошибка: возможно, такой код уже существует.');
                 }
+                return res.sendStatus(200);
+            }
+
+            // Команда /activate – активація промокоду через бота
+            if (text.startsWith('/activate')) {
+                const parts = text.split(' ');
+                if (parts.length !== 2) {
+                    await sendMessage(chatId, 'Используйте: /activate [код]');
+                    return res.sendStatus(200);
+                }
+                const code = parts[1].toUpperCase();
+                const promo = db.prepare('SELECT * FROM promocodes WHERE code = ? AND used_count < max_uses').get(code);
+                if (!promo) {
+                    await sendMessage(chatId, '❌ Промокод не найден или уже исчерпан.');
+                    return res.sendStatus(200);
+                }
+                db.prepare('UPDATE promocodes SET used_count = used_count + 1 WHERE code = ?').run(code);
+                db.prepare('INSERT OR IGNORE INTO users (telegram_id, balance) VALUES (?, 0)').run(chatId);
+                db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(promo.amount, chatId);
+                const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(chatId);
+                await sendMessage(chatId, `🎉 Вы активировали промокод ${code} и получили ${promo.amount} ⭐! Ваш баланс: ${user.balance} ⭐`);
                 return res.sendStatus(200);
             }
 
@@ -249,7 +267,7 @@ app.post('/webhook', async (req, res) => {
             }
         }
 
-        // Callback-запросы
+        // Callback-запити
         if (update.callback_query) {
             const query = update.callback_query;
             const chatId = query.message.chat.id;
@@ -330,7 +348,7 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// ---------- Вспомогательные функции ----------
+// ---------- Допоміжні функції ----------
 async function sendMessage(chatId, text, extra = {}) {
     try {
         const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
