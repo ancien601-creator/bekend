@@ -10,7 +10,7 @@ MAX_FILESIZE = 50 * 1024 * 1024
 
 
 def is_supported_url(url: str) -> bool:
-    """Проверяет, поддерживает ли бот ссылку (снова добавили YouTube)."""
+    """Проверяет, поддерживает ли бот ссылку."""
     url = url.lower()
     return any(domain in url for domain in (
         "tiktok.com",
@@ -28,15 +28,14 @@ def download_video(url: str) -> str:
 
     ydl_opts = {
         "outtmpl": out_template,
-        "format": "mp4/best[ext=mp4]/best",
+        # 🛠 Убираем строгие ограничения. Берем всё самое лучшее, что отдаст мобильный клиент
+        "format": "best", 
         "merge_output_format": "mp4",
         "max_filesize": MAX_FILESIZE,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
-        
-        # Наш секретный соус для обхода блокировок Ютуба без куки
         "extractor_args": {
             "youtube": {
                 "player_client": ["mweb", "home"]
@@ -51,7 +50,7 @@ def download_video(url: str) -> str:
         # If yt-dlp merged/changed the container format, find the actual file
         if not os.path.exists(filename):
             base, _ = os.path.splitext(filename)
-            for ext in (".mp4", ".webm", ".mkv"):
+            for ext in (".mp4", ".webm", ".mkv", ".3gp"):
                 candidate = base + ext
                 if os.path.exists(candidate):
                     filename = candidate
