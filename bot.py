@@ -26,7 +26,7 @@ from db import (
 from downloader import is_supported_url, download_video, MAX_FILESIZE
 
 # Bot token: set as env variable BOT_TOKEN, or paste it directly here
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8670884403:AAHQ7W6yWAornj8Oz3VgQgiZJ5690ncAyRU")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 PRICE_STARS = 1  # price per video after free downloads run out
 
@@ -244,7 +244,10 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 def main():
     init_db()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    
+
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
