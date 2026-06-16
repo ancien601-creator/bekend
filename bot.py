@@ -11,6 +11,7 @@ from telegram.ext import (
     PreCheckoutQueryHandler,
     ContextTypes,
     filters,
+    ApplicationBuilder,
 )
 
 from db import (
