@@ -28,17 +28,18 @@ def download_video(url: str) -> str:
 
     ydl_opts = {
         "outtmpl": out_template,
-        # 🛠 Убираем строгие ограничения. Берем всё самое лучшее, что отдаст мобильный клиент
-        "format": "best", 
+        # 🛠 Разрешаем склеивать видео и аудио, либо брать любой доступный формат
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "merge_output_format": "mp4",
-        "max_filesize": MAX_FILESIZE,
+        # ✂️ УБРАЛИ max_filesize отсюда, чтобы yt-dlp не отбрасывал форматы без размера
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
         "extractor_args": {
             "youtube": {
-                "player_client": ["mweb", "home"]
+                # Расширяем арсенал: пробуем притвориться айфоном, андроидом и мобильным вебом
+                "player_client": ["ios", "android", "mweb"]
             }
         }
     }
@@ -58,6 +59,11 @@ def download_video(url: str) -> str:
 
         if not os.path.exists(filename):
             raise FileNotFoundError("Не вдалося знайти завантажений файл")
+
+        # 📏 Ручная проверка размера файла после скачивания
+        if os.path.getsize(filename) > MAX_FILESIZE:
+            os.remove(filename)  # Удаляем слишком большой файл
+            raise ValueError("Відео занадто велике для Telegram (більше 50 МБ).")
 
         return filename
         
