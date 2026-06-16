@@ -45,7 +45,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я бот для скачивания видео из TikTok и YouTube.\n\n"
         "🎬 Как я работаю:\n"
-        "1. Ты присылаешь мне ссылку на видео из TikTok или YouTube\n"
+        "1. Ты присылаешь мне ссылку на видео из TikTok \n"
         "2. Я скачиваю его без водяных знаков и лишней рекламы\n"
         "3. Отправляю готовое видео прямо тебе в чат\n\n"
         f"🎁 У тебя есть {free_left} бесплатных скачиваний.\n"
@@ -61,7 +61,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     free_left = get_free_left(user_id)
     await update.message.reply_text(
         "ℹ️ О боте\n\n"
-        "Я умею скачивать видео из TikTok и YouTube по ссылке — без водяных "
+        "Я умею скачивать видео из TikTok по ссылке — без водяных "
         "знаков, без рекламы и без необходимости заходить в приложение.\n\n"
         "📌 Как пользоваться:\n"
         "— Скопируй ссылку на видео из TikTok или YouTube\n"
