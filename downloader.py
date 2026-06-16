@@ -10,21 +10,19 @@ MAX_FILESIZE = 50 * 1024 * 1024
 
 
 def is_supported_url(url: str) -> bool:
+    """Проверяет, поддерживает ли бот эту ссылку (теперь только TikTok)."""
     url = url.lower()
-    return any(domain in url for domain in (
-        "tiktok.com",
-        "youtube.com",
-        "youtu.be",
-    ))
+    return "tiktok.com" in url
 
 
 def download_video(url: str) -> str:
     """
-    Downloads a video from TikTok/YouTube and returns the local file path.
+    Downloads a video from TikTok and returns the local file path.
     Raises an exception if the download fails or the file is too large.
     """
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
 
+    # Вернул чистые и простые настройки, "как было" в самом начале
     ydl_opts = {
         "outtmpl": out_template,
         "format": "mp4/best[ext=mp4]/best",
@@ -34,11 +32,6 @@ def download_video(url: str) -> str:
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["mweb", "web_safari"]
-            }
-        }
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -58,3 +51,4 @@ def download_video(url: str) -> str:
             raise FileNotFoundError("Не вдалося знайти завантажений файл")
 
         return filename
+        
