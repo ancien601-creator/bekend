@@ -25,7 +25,7 @@ def download_video(url: str) -> str:
     """
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
 
-   ydl_opts = {
+    ydl_opts = {
         "outtmpl": out_template,
         "format": "mp4/best[ext=mp4]/best",
         "merge_output_format": "mp4",
@@ -34,8 +34,6 @@ def download_video(url: str) -> str:
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
-        
-        # 🕵️‍♂️ Включаем режим скрытности мобильного Safari
         "extractor_args": {
             "youtube": {
                 "player_client": ["mweb", "web_safari"]
