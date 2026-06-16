@@ -34,6 +34,14 @@ def download_video(url: str) -> str:
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
+        
+        # 🔥 ВОТ ЭТОТ БЛОК ОБХОДИТ БЛОКИРОВКУ «Sign in to confirm you’re not a bot»
+        # Мы заставляем yt-dlp притворяться официальными приложениями iOS, Android и SmartTV
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "android", "tv"]
+            }
+        }
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
