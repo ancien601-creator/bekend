@@ -25,28 +25,42 @@ def download_video(url: str) -> str:
     Raises an exception if the download fails or the file is too large.
     """
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
+    
+    # 🧼 Авто-прачечная для куки файлов
+    cookies_source = "cookies.txt"
+    cookies_cleaned = os.path.join(DOWNLOAD_DIR, "clean_cookies.txt")
+    
+    if os.path.exists(cookies_source):
+        # utf-8-sig автоматически отсекает невидимый косяк Windows (BOM)
+        with open(cookies_source, "r", encoding="utf-8-sig", errors="ignore") as f:
+            content = f.read()
+        
+        # lstrip() убирает случайные пустые строки или пробелы в самом начале
+        cleaned_content = content.lstrip()
+        
+        with open(cookies_cleaned, "w", encoding="utf-8") as f:
+            f.write(cleaned_content)
+    else:
+        # Если файла нет, пусть yt-dlp ругнется на отсутствие, а не падает
+        cookies_cleaned = cookies_source
 
     ydl_opts = {
         "outtmpl": out_template,
-        
-        # 🛠 Умный поиск: если нет целого файла, качаем видео и звук отдельно и клеим (ffmpeg поможет)
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
-        
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
         
-        # 🍪 Куки для обхода защиты от ботов
-        "cookiefile": "cookies.txt"
+        # 🍪 Кормим yt-dlp идеально чистым файлом
+        "cookiefile": cookies_cleaned
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
 
-        # Проверяем расширение после склейки
         if not os.path.exists(filename):
             base, _ = os.path.splitext(filename)
             for ext in (".mp4", ".webm", ".mkv", ".3gp"):
@@ -58,9 +72,8 @@ def download_video(url: str) -> str:
         if not os.path.exists(filename):
             raise FileNotFoundError("Не вдалося знайти завантажений файл")
 
-        # Проверка размера
         if os.path.getsize(filename) > MAX_FILESIZE:
-            os.remove(filename)  # Удаляем слишком большой файл
+            os.remove(filename)
             raise ValueError("Відео занадто велике для Telegram (більше 50 МБ).")
 
         return filename
