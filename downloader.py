@@ -28,14 +28,16 @@ def download_video(url: str) -> str:
 
     ydl_opts = {
         "outtmpl": out_template,
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "merge_output_format": "mp4",
+        
+        # 🛠 Берем лучший УЖЕ СКЛЕЕННЫЙ файл, чтобы не зависеть от ffmpeg
+        "format": "best", 
+        
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
         
-        # 🍪 Подключаем наш пропуск!
+        # 🍪 Пропуск всё еще с нами
         "cookiefile": "cookies.txt"
     }
 
@@ -43,7 +45,7 @@ def download_video(url: str) -> str:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
 
-        # If yt-dlp merged/changed the container format, find the actual file
+        # Проверяем, с каким расширением сохранился файл
         if not os.path.exists(filename):
             base, _ = os.path.splitext(filename)
             for ext in (".mp4", ".webm", ".mkv", ".3gp"):
