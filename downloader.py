@@ -52,22 +52,20 @@ def download_video(url: str) -> str:
         info = ydl.extract_info(url, download=False)
         duration = info.get("duration", 0)  # Длительность в секундах
 
-    # --- ШАГ 2: Динамический подбор формата под длину видео ---
+    # --- ШАГ 2: Динамический подбор формата с железным падением в fallback ---
     if duration == 0:
-        # Если длину не определить (стрим или TikTok), берем стандартное лучшее
         fmt = "bestvideo+bestaudio/best"
     elif duration <= 180:
-        # До 3 минут — качаем в максимальном качестве (1080p и выше)
         fmt = "bestvideo+bestaudio/best"
     elif duration <= 600:
-        # До 10 минут — ограничиваем до 720p
-        fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+        # Пытаемся взять 720p, если его нет — берем абсолютно любое доступное видео+аудио
+        fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best"
     elif duration <= 1800:
-        # До 30 минут — ограничиваем до 480p
-        fmt = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
+        # Пытаемся взять 480p, если нет — аварийный обход на любое доступное видео
+        fmt = "bestvideo[height<=480]+bestaudio/best[height<=480]/bestvideo+bestaudio/best"
     else:
-        # Больше 30 минут — жмем до 360p, чтобы точно влезть
-        fmt = "bestvideo[height<=360]+bestaudio/best[height<=360]/best"
+        # Пытаемся взять 360p, если нет — аварийный обход на любое доступное видео
+        fmt = "bestvideo[height<=360]+bestaudio/best[height<=360]/bestvideo+bestaudio/best"
 
     ydl_opts = {
         "outtmpl": out_template,
@@ -102,16 +100,13 @@ def download_video(url: str) -> str:
             if duration > 0:
                 compressed_filename = os.path.join(DOWNLOAD_DIR, f"compressed_{uuid.uuid4()}.mp4")
                 
-                # Таргет — вписать видео примерно в 45 МБ (с запасом)
-                # Формула битрейта: (Размер в битах) / длительность
+                # Вписываем видео в 45 МБ
                 target_size_bits = 45 * 1024 * 1024 * 8
                 target_bitrate = int(target_size_bits / duration)
                 
-                # Нижний порог битрейта, чтобы видео не превратилось в пиксельное месиво
                 if target_bitrate < 150000:
                     target_bitrate = 150000
 
-                # Команда для ультрабыстрого пережатия видеосигнала
                 cmd = [
                     "ffmpeg", "-y", "-i", filename,
                     "-b:v", str(target_bitrate),
@@ -123,12 +118,10 @@ def download_video(url: str) -> str:
                 ]
                 
                 try:
-                    # Запуск сжатия в фоновом режиме
                     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    os.remove(filename)  # Удаляем тяжелый оригинал
+                    os.remove(filename)
                     filename = compressed_filename
                 except Exception:
-                    # Если сжатие упало, проверяем оригинал и действуем по ситуации
                     if os.path.getsize(filename) > MAX_FILESIZE:
                         os.remove(filename)
                         raise ValueError("Відео занадто велике, і його не вдалося стиснути.")
@@ -137,4 +130,4 @@ def download_video(url: str) -> str:
                 raise ValueError("Відео занадто велике для Telegram (більше 50 МБ).")
 
         return filename
-                
+    
