@@ -29,15 +29,16 @@ def download_video(url: str) -> str:
     ydl_opts = {
         "outtmpl": out_template,
         
-        # 🛠 Берем лучший УЖЕ СКЛЕЕННЫЙ файл, чтобы не зависеть от ffmpeg
-        "format": "best", 
+        # 🛠 Умный поиск: если нет целого файла, качаем видео и звук отдельно и клеим (ffmpeg поможет)
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "merge_output_format": "mp4",
         
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
         
-        # 🍪 Пропуск всё еще с нами
+        # 🍪 Куки для обхода защиты от ботов
         "cookiefile": "cookies.txt"
     }
 
@@ -45,7 +46,7 @@ def download_video(url: str) -> str:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
 
-        # Проверяем, с каким расширением сохранился файл
+        # Проверяем расширение после склейки
         if not os.path.exists(filename):
             base, _ = os.path.splitext(filename)
             for ext in (".mp4", ".webm", ".mkv", ".3gp"):
@@ -57,7 +58,7 @@ def download_video(url: str) -> str:
         if not os.path.exists(filename):
             raise FileNotFoundError("Не вдалося знайти завантажений файл")
 
-        # Ручная проверка размера файла после скачивания
+        # Проверка размера
         if os.path.getsize(filename) > MAX_FILESIZE:
             os.remove(filename)  # Удаляем слишком большой файл
             raise ValueError("Відео занадто велике для Telegram (більше 50 МБ).")
