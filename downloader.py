@@ -22,9 +22,8 @@ def is_supported_url(url: str) -> bool:
 
 def download_video(url: str) -> str:
     """
-    Скачивает видео с YouTube/TikTok. 
-    Автоматически подбирает разрешение под длительность и сжимает файл,
-    если он превышает лимит в 50 МБ.
+    Скачивает видео с YouTube/TikTok с обходом блокировок форматов
+    и автоматическим сжатием под лимит 50 МБ.
     """
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
     
@@ -41,30 +40,38 @@ def download_video(url: str) -> str:
     else:
         cookies_cleaned = cookies_source
 
-    # --- ШАГ 1: Быстрый запрос информации о видео (без скачивания) ---
+    # Маскировка под разные устройства для обхода «Requested format is not available»
+    client_spoofing = {"youtube": {"player_client": ["android", "web"]}}
+
+    # --- ШАГ 1: Попытка запроса информации о видео (Безопасная) ---
+    duration = 0
     meta_opts = {
         "quiet": True,
         "no_warnings": True,
-        "cookiefile": cookies_cleaned
+        "cookiefile": cookies_cleaned,
+        "extractor_args": client_spoofing
     }
     
-    with yt_dlp.YoutubeDL(meta_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        duration = info.get("duration", 0)  # Длительность в секундах
+    try:
+        with yt_dlp.YoutubeDL(meta_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            duration = info.get("duration", 0)
+    except Exception:
+        # Если Ютуб скрыл форматы на этапе инфо-запроса, не падаем.
+        # Просто ставим duration=0, что включит самый экономный режим скачивания.
+        duration = 0
 
-    # --- ШАГ 2: Динамический подбор формата с железным падением в fallback ---
+    # --- ШАГ 2: Динамический подбор формата с железным падением в аварийный режим ---
     if duration == 0:
-        fmt = "bestvideo+bestaudio/best"
+        # Если длину узнать не удалось, просим самый легкий базовый формат, чтобы точно проскочить
+        fmt = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
     elif duration <= 180:
         fmt = "bestvideo+bestaudio/best"
     elif duration <= 600:
-        # Пытаемся взять 720p, если его нет — берем абсолютно любое доступное видео+аудио
         fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best"
     elif duration <= 1800:
-        # Пытаемся взять 480p, если нет — аварийный обход на любое доступное видео
         fmt = "bestvideo[height<=480]+bestaudio/best[height<=480]/bestvideo+bestaudio/best"
     else:
-        # Пытаемся взять 360p, если нет — аварийный обход на любое доступное видео
         fmt = "bestvideo[height<=360]+bestaudio/best[height<=360]/bestvideo+bestaudio/best"
 
     ydl_opts = {
@@ -75,7 +82,8 @@ def download_video(url: str) -> str:
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
-        "cookiefile": cookies_cleaned
+        "cookiefile": cookies_cleaned,
+        "extractor_args": client_spoofing
     }
 
     # --- ШАГ 3: Скачивание файла ---
@@ -83,7 +91,6 @@ def download_video(url: str) -> str:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
 
-        # Проверка расширения после склейки в mp4
         if not os.path.exists(filename):
             base, _ = os.path.splitext(filename)
             for ext in (".mp4", ".webm", ".mkv", ".3gp"):
@@ -95,12 +102,10 @@ def download_video(url: str) -> str:
         if not os.path.exists(filename):
             raise FileNotFoundError("Не вдалося знайти завантажений файл")
 
-        # --- ШАГ 4: Подстраховка через FFmpeg (если файл всё равно > 50MB) ---
+        # --- ШАГ 4: Подстраховка через FFmpeg (если файл все равно > 50MB) ---
         if os.path.getsize(filename) > MAX_FILESIZE:
             if duration > 0:
                 compressed_filename = os.path.join(DOWNLOAD_DIR, f"compressed_{uuid.uuid4()}.mp4")
-                
-                # Вписываем видео в 45 МБ
                 target_size_bits = 45 * 1024 * 1024 * 8
                 target_bitrate = int(target_size_bits / duration)
                 
@@ -126,8 +131,9 @@ def download_video(url: str) -> str:
                         os.remove(filename)
                         raise ValueError("Відео занадто велике, і його не вдалося стиснути.")
             else:
+                # Если пережать не удается из-за отсутствия метаданных длины, удаляем, чтобы не спамить ошибками лимита Telegram
                 os.remove(filename)
-                raise ValueError("Відео занадто велике для Telegram (більше 50 МБ).")
+                raise ValueError("Відео перевищує 50 МБ. Спробуйте інше відео.")
 
         return filename
     
