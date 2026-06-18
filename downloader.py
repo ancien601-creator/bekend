@@ -22,12 +22,12 @@ def is_supported_url(url: str) -> bool:
 
 def download_video(url: str) -> str:
     """
-    Скачивает видео в пониженном качестве (360p/Legacy),
-    чтобы обойти блокировку 'Sign in to confirm you're not a bot'.
+    Скачивает видео в низком качестве (360p или worst), используя гибкие фильтры,
+    чтобы аварийные клиенты (iOS/ТВ) не падали с ошибкой отсутствия форматов.
     """
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
     
-    # Очистка куки от BOM-маркеров (если файл cookies.txt закинут в корень)
+    # Очистка куки от BOM-маркеров (если файл cookies.txt добавлен)
     cookies_source = "cookies.txt"
     cookies_cleaned = os.path.join(DOWNLOAD_DIR, "clean_cookies.txt")
     
@@ -48,24 +48,32 @@ def download_video(url: str) -> str:
         "retries": 3,
     }
 
-    # Каскад стратегий, заточенных под обход капчи через низкое качество (360p)
+    # Универсальный и гибкий фильтр низкого качества:
+    # Ищет 360p, если нет — берет самый минимальный доступный формат (worst)
+    low_quality_fmt = "bestvideo[height<=360]+bestaudio/best[height<=360]/worst"
+
     strategies = [
-        # 1. Формат 18 (древний цельный mp4 360p) + встроенный плеер ТВ (самый надежный обход)
+        # Стратегия 1: Встроенный плеер Android (часто пропускает без капчи)
         {
-            "format": "18/best[height<=360]/worst",
+            "format": low_quality_fmt,
             "cookiefile": cookies_cleaned,
-            "extractor_args": {"youtube": {"player_client": ["tv_embedded", "android_embedded"]}}
+            "extractor_args": {"youtube": {"player_client": ["android_embedded", "web_embedded"]}}
         },
-        # 2. Тот же формат 18, но вообще БЕЗ кук (если старые куки скомпрометированы)
+        # Стратегия 2: Клиент iOS (у него свои форматы, но фильтр 'worst' выберет нужный)
         {
-            "format": "18/best[height<=360]/worst",
-            "extractor_args": {"youtube": {"player_client": ["tv_embedded", "web_embedded"]}}
+            "format": low_quality_fmt,
+            "cookiefile": cookies_cleaned,
+            "extractor_args": {"youtube": {"player_client": ["ios"]}}
         },
-        # 3. Аварийный iOS-клиент на минималках
+        # Стратегия 3: Smart-TV клиент без использования кук (на случай бана аккаунта)
+        {
+            "format": "best[height<=360]/worst",
+            "extractor_args": {"youtube": {"player_client": ["tv_downgraded"]}}
+        },
+        # Стратегия 4: Тотальный сброс — забрать вообще хоть что-нибудь
         {
             "format": "worst",
-            "cookiefile": cookies_cleaned,
-            "extractor_args": {"youtube": {"player_client": ["ios", "tv"]}}
+            "extractor_args": {"youtube": {"player_client": ["tv"]}}
         }
     ]
 
@@ -83,7 +91,7 @@ def download_video(url: str) -> str:
                 download_info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(download_info)
                 
-                # Проверка расширений
+                # Проверка расширений на диске
                 if filename and not os.path.exists(filename):
                     base, _ = os.path.splitext(filename)
                     for ext in (".mp4", ".webm", ".mkv", ".3gp"):
@@ -93,24 +101,24 @@ def download_video(url: str) -> str:
                             break
                             
                 if filename and os.path.exists(filename):
-                    break
+                    break  # Видео успешно скачано!
         except Exception as e:
             last_error = e
             continue
 
     if not filename or not os.path.exists(filename):
-        raise last_error or FileNotFoundError("Ютуб заблокировал даже запросы в низком качестве.")
+        raise last_error or FileNotFoundError("Ютуб заблокировал все попытки скачивания.")
 
     duration = download_info.get("duration", 0) if download_info else 0
 
-    # Сжатие (на случай, если видео очень длинное, хоть и в 360p)
+    # Сжатие через FFmpeg (на случай, если скачался worst-файл, но видео идет 3 часа)
     if os.path.getsize(filename) > MAX_FILESIZE:
         if duration > 0:
             compressed_filename = os.path.join(DOWNLOAD_DIR, f"compressed_{uuid.uuid4()}.mp4")
             target_size_bits = 46 * 1024 * 1024 * 8
             target_bitrate = int(target_size_bits / duration)
             
-            audio_bitrate = 64000  # ужимаем звук ради экономии
+            audio_bitrate = 64000
             video_bitrate = target_bitrate - audio_bitrate
             if video_bitrate < 100000:
                 video_bitrate = 100000
@@ -130,9 +138,9 @@ def download_video(url: str) -> str:
             except Exception:
                 if os.path.getsize(filename) > MAX_FILESIZE:
                     os.remove(filename)
-                    raise ValueError("Не вдалося втиснути файл у ліміт.")
+                    raise ValueError("Не вдалося втиснути файл у ліміт Telegram.")
         else:
             os.remove(filename)
-            raise ValueError("Файл занадто великий, довжина невідома.")
+            raise ValueError("Файл занадто великий, а его длительность неизвестна.")
 
     return filename
