@@ -4,7 +4,6 @@ import subprocess
 import logging
 import yt_dlp
 
-# Подключаем логгер проекта, чтобы видеть сообщения в консоли Railway
 logger = logging.getLogger(__name__)
 
 DOWNLOAD_DIR = "downloads"
@@ -24,7 +23,6 @@ def download_video(url: str) -> str:
     cookies_source = "cookies.txt"
     cookies_cleaned = os.path.join(DOWNLOAD_DIR, "clean_cookies.txt")
     
-    # ПРОВЕРКА КУК ЧЕРЕЗ ЛОГГЕР
     if os.path.exists(cookies_source):
         logger.info(f"[COOKIES] Файл {cookies_source} НАЙДЕН на сервере. Очищаем от BOM...")
         with open(cookies_source, "r", encoding="utf-8-sig", errors="ignore") as f:
@@ -33,32 +31,37 @@ def download_video(url: str) -> str:
         with open(cookies_cleaned, "w", encoding="utf-8") as f:
             f.write(cleaned_content)
     else:
-        logger.error(f"[COOKIES] Файл {cookies_source} НЕ НАЙДЕН в корне проекта на сервере Railway!")
+        logger.error(f"[COOKIES] Файл {cookies_source} НЕ НАЙДЕН в корне проекта!")
         cookies_cleaned = None
 
+    # Имитируем реальный десктопный браузер, чтобы YouTube не ругался на смену окружения
     base_opts = {
         "outtmpl": out_template,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
     }
 
-    # Каскад стратегий с разными клиентами YouTube
     strategies = [
-        # 1. Мобильный веб + Куки (самый живучий вариант против блокировок форматов)
+        # 1. Веб-клиент с куками + маскировка браузера
         {
             "format": "best",
             "cookiefile": cookies_cleaned,
-            "extractor_args": {"youtube": {"player_client": ["mweb", "web"]}}
+            "extractor_args": {"youtube": {"player_client": ["web", "mweb"]}}
         },
-        # 2. IOS клиент + Куки
+        # 2. IOS клиент (иногда игнорирует строгие проверки геолокации кук)
         {
             "format": "best",
             "cookiefile": cookies_cleaned,
             "extractor_args": {"youtube": {"player_client": ["ios"]}}
         },
-        # 3. Деградация до ТВ-клиента (не требует кук, но видео может быть в низком качестве)
+        # 3. Резервный ТВ-клиент без кук
         {
             "format": "best",
             "extractor_args": {"youtube": {"player_client": ["tv_downgraded"]}}
