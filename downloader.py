@@ -11,7 +11,7 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 MAX_FILESIZE = 50 * 1024 * 1024
 
-# Очищенный пул прокси (удалены неоплаченные Webshare с ошибкой 402)
+# Пул публичных прокси со скриншотов
 PROXIES_LIST = [
     # --- Публичные прокси (Advanced Name) ---
     "socks5://188.68.205.126:1080",
@@ -95,127 +95,88 @@ def download_video(url: str) -> str:
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
     url_lower = url.lower()
     
-    cookies_source = "cookies.txt"
-    cookies_cleaned = os.path.join(DOWNLOAD_DIR, "clean_cookies.txt")
-    
-    if os.path.exists(cookies_source):
-        logger.info(f"[COOKIES] Файл {cookies_source} НАЙДЕН. Очищаем от BOM...")
-        with open(cookies_source, "r", encoding="utf-8-sig", errors="ignore") as f:
-            content = f.read()
-        cleaned_content = content.lstrip()
-        with open(cookies_cleaned, "w", encoding="utf-8") as f:
-            f.write(cleaned_content)
-    else:
-        cookies_cleaned = None
-
-    base_opts = {
-        "outtmpl": out_template,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "retries": 1,
-        "socket_timeout": 4,  # Жесткий лимит: если прокси тупит больше 4 секунд — сбрасываем
-        "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[ext=mp4]/best",
-        "merge_output_format": "mp4",
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
+    # TikTok качаем напрямую на полной скорости сервера
+    if not any(domain in url_lower for domain in ("youtube.com", "youtu.be")):
+        logger.info("[DIRECT] Качаем напрямую без прокси...")
+        opts = {
+            "outtmpl": out_template,
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+            "merge_output_format": "mp4"
         }
-    }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            download_info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(download_info)
+            return finalize_video(filename, download_info)
 
+    # Скоростной перебор пула для YouTube
+    logger.info(f"[ROTATE] Запуск ускоренного перебора {len(PROXIES_LIST)} прокси.")
+    
     filename = None
     download_info = None
     last_error = None
 
-    # TikTok/Instagram качаем напрямую без прокси на максимальной скорости Railway
-    if not any(domain in url_lower for domain in ("youtube.com", "youtu.be")):
-        logger.info("[DIRECT] Ссылка не из YouTube. Качаем напрямую через Railway...")
+    for p_idx, current_proxy in enumerate(PROXIES_LIST, start=1):
+        logger.info(f"[PROXY] Проверка №{p_idx}/{len(PROXIES_LIST)} -> {current_proxy.split('://')[-1]}")
+        
+        # Сверх-агрессивные настройки скорости соединения
+        opts = {
+            "outtmpl": out_template,
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "retries": 0,
+            "socket_timeout": 2.5,  # Ждем ответа не более 2.5 секунд
+            "proxy": current_proxy,
+            "extractor_args": {"youtube": {"player_client": ["tv_downgraded"]}},
+            "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+            "merge_output_format": "mp4",
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        }
+        
         try:
-            with yt_dlp.YoutubeDL(base_opts) as ydl:
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 download_info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(download_info)
+                
+                # Фикс расширения файла, если оно склеилось иначе
+                if filename and not os.path.exists(filename):
+                    base, _ = os.path.splitext(filename)
+                    for ext in (".mp4", ".webm", ".mkv"):
+                        if os.path.exists(base + ext):
+                            filename = base + ext
+                            break
+                            
                 if filename and os.path.exists(filename):
-                    return finalize_video(filename, download_info)
-        except Exception as e:
-            raise e
-
-    # Умная скоростная ротация для YouTube
-    logger.info(f"[ROTATE] Начинаем перебор пула из {len(PROXIES_LIST)} активных прокси.")
-    
-    strategies = [
-        {"extractor_args": {"youtube": {"player_client": ["tv_downgraded"]}}},
-        {"extractor_args": {"youtube": {"player_client": ["creator"]}}},
-        {"cookiefile": cookies_cleaned, "extractor_args": {"youtube": {"player_client": ["android"]}}},
-        {"cookiefile": cookies_cleaned, "extractor_args": {"youtube": {"player_client": ["web_embedded"]}}}
-    ]
-
-    proxy_success = False
-
-    for p_idx, current_proxy in enumerate(PROXIES_LIST, start=1):
-        masked_proxy = current_proxy.split("@")[-1]
-        logger.info(f"[PROXY] Пробуем прокси №{p_idx}/{len(PROXIES_LIST)} ({masked_proxy})")
-        
-        base_opts["proxy"] = current_proxy
-        
-        for s_idx, strat in enumerate(strategies, start=1):
-            if "cookiefile" in strat and not cookies_cleaned:
-                continue
-                
-            opts = {**base_opts, **strat}
-            client_name = strat["extractor_args"]["youtube"]["player_client"][0]
-            
-            try:
-                logger.info(f"[DOWNLOAD] Прокси №{p_idx} -> Стратегия №{s_idx} ({client_name})...")
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    download_info = ydl.extract_info(url, download=True)
-                    filename = ydl.prepare_filename(download_info)
-                    
-                    if filename and not os.path.exists(filename):
-                        base, _ = os.path.splitext(filename)
-                        for ext in (".mp4", ".webm", ".mkv", ".3gp"):
-                            candidate = base + ext
-                            if os.path.exists(candidate):
-                                filename = candidate
-                                break
-                                
-                    if filename and os.path.exists(filename):
-                        logger.info(f"[SUCCESS] Успешно скачано через Прокси №{p_idx}")
-                        proxy_success = True
-                        break
-            except Exception as e:
-                err_msg = str(e)
-                logger.warning(f"[FAIL] Прокси №{p_idx}, Стратегия №{s_idx} мимо.")
-                last_error = e
-                
-                # Если прокси выдает ошибку сети, блокировку или упал — мгновенно прерываем стратегии и меняем IP
-                if any(err in err_msg for err in ("402", "Tunnel", "407", "403", "Connection refused", "timed out", "Timeout")):
-                    logger.error(f"[PROXY DEAD] Прокси №{p_idx} недоступен. Смена IP...")
+                    logger.info(f"[SUCCESS] Видео успешно стянуто через прокси №{p_idx}!")
                     break
-                continue
-                
-        if proxy_success:
-            break
+        except Exception as e:
+            logger.warning(f"[FAIL] Прокси №{p_idx} мимо (Ошибка или Таймаут).")
+            last_error = e
+            continue  # Любой сбой — мгновенно берем следующий IP
 
     if not filename or not os.path.exists(filename):
-        raise last_error or FileNotFoundError("Все прокси из пула заблокированы YouTube или недоступны.")
+        raise last_error or FileNotFoundError("Все доступные публичные прокси не ответили или заблокированы.")
 
     return finalize_video(filename, download_info)
 
 def finalize_video(filename: str, download_info: dict) -> str:
-    """Проверка размера и сжатие видео через ffmpeg до 50 МБ"""
+    """Сжатие файла через ffmpeg до 50 МБ при необходимости"""
     duration = download_info.get("duration", 0) if download_info else 0
 
     if os.path.getsize(filename) > MAX_FILESIZE:
         if duration > 0:
-            logger.info("[COMPRESS] Файл превышает 50 МБ. Запускаем сжатие...")
+            logger.info("[COMPRESS] Файл > 50 МБ. Запуск быстрого сжатия...")
             compressed_filename = os.path.join(DOWNLOAD_DIR, f"compressed_{uuid.uuid4()}.mp4")
             target_size_bits = 46 * 1024 * 1024 * 8
             target_bitrate = int(target_size_bits / duration)
             
-            audio_bitrate = 64000
-            video_bitrate = target_bitrate - audio_bitrate
-            if video_bitrate < 150000:
-                video_bitrate = 150000
+            video_bitrate = max(target_bitrate - 64000, 150000)
 
             cmd = [
                 "ffmpeg", "-y", "-i", filename,
@@ -232,15 +193,15 @@ def finalize_video(filename: str, download_info: dict) -> str:
                 subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 os.remove(filename)
                 filename = compressed_filename
-                logger.info("[COMPRESS] Сжатие завершено успешно.")
+                logger.info("[COMPRESS] Видео успешно сжато.")
             except Exception as compress_err:
-                logger.error(f"[COMPRESS] Ошибка сжатия: {compress_err}")
+                logger.error(f"[COMPRESS] Ошибка ffmpeg: {compress_err}")
                 if os.path.getsize(filename) > MAX_FILESIZE:
                     os.remove(filename)
-                    raise ValueError("Файл слишком большой для отправки в Telegram (>50MB).")
+                    raise ValueError("Не удалось ужать видео под лимиты Telegram.")
         else:
             os.remove(filename)
-            raise ValueError("Файл превышает 50 МБ, сжатие невозможно (не определена длительность).")
+            raise ValueError("Файл весит больше 50 МБ, сжатие невозможно.")
 
     return filename
-            
+    
