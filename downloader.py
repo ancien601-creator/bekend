@@ -24,17 +24,17 @@ def download_video(url: str) -> str:
     cookies_cleaned = os.path.join(DOWNLOAD_DIR, "clean_cookies.txt")
     
     if os.path.exists(cookies_source):
-        logger.info(f"[COOKIES] Файл {cookies_source} НАЙДЕН на сервере. Очищаем от BOM...")
+        logger.info(f"[COOKIES] Файл {cookies_source} НАЙДЕН. Очищаем от BOM...")
         with open(cookies_source, "r", encoding="utf-8-sig", errors="ignore") as f:
             content = f.read()
         cleaned_content = content.lstrip()
         with open(cookies_cleaned, "w", encoding="utf-8") as f:
             f.write(cleaned_content)
     else:
-        logger.error(f"[COOKIES] Файл {cookies_source} НЕ НАЙДЕН в корне проекта!")
+        logger.warning("[COOKIES] Файл cookies.txt отсутствует, пробуем без него.")
         cookies_cleaned = None
 
-    # Имитируем реальный десктопный браузер, чтобы YouTube не ругался на смену окружения
+    # Базовые настройки маскировки под мобильное устройство
     base_opts = {
         "outtmpl": out_template,
         "quiet": True,
@@ -42,29 +42,35 @@ def download_video(url: str) -> str:
         "noplaylist": True,
         "retries": 3,
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "User-Agent": "com.google.android.youtube/19.21.34 (Linux; U; Android 14; gda Build/UQ1A.240205.002) gzip",
             "Accept-Language": "en-US,en;q=0.9",
         }
     }
 
+    # Меняем тактику: используем клиенты с самой слабой проверкой IP дата-центров
     strategies = [
-        # 1. Веб-клиент с куками + маскировка браузера
+        # 1. Android клиент + Куки (самый высокий шанс пробить бан IP)
         {
             "format": "best",
             "cookiefile": cookies_cleaned,
-            "extractor_args": {"youtube": {"player_client": ["web", "mweb"]}}
+            "extractor_args": {"youtube": {"player_client": ["android"]}}
         },
-        # 2. IOS клиент (иногда игнорирует строгие проверки геолокации кук)
+        # 2. Web Embedded (имитация плеера, встроенного в сторонний сайт)
+        {
+            "format": "best",
+            "cookiefile": cookies_cleaned,
+            "extractor_args": {"youtube": {"player_client": ["web_embedded"]}}
+        },
+        # 3. IOS клиент (как резерв)
         {
             "format": "best",
             "cookiefile": cookies_cleaned,
             "extractor_args": {"youtube": {"player_client": ["ios"]}}
         },
-        # 3. Резервный ТВ-клиент без кук
+        # 4. Чистый Android без кук (если куки заблокированы из-за геолокации)
         {
             "format": "best",
-            "extractor_args": {"youtube": {"player_client": ["tv_downgraded"]}}
+            "extractor_args": {"youtube": {"player_client": ["android"]}}
         }
     ]
 
@@ -78,7 +84,7 @@ def download_video(url: str) -> str:
             
         opts = {**base_opts, **strat}
         try:
-            logger.info(f"[DOWNLOAD] Пробуем стратегию обхода №{i}...")
+            logger.info(f"[DOWNLOAD] Пробуем стратегию обхода №{i} ({strat['extractor_args']['youtube']['player_client']})...")
             with yt_dlp.YoutubeDL(opts) as ydl:
                 download_info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(download_info)
