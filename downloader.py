@@ -1,7 +1,11 @@
 import os
 import uuid
 import subprocess
+import logging
 import yt_dlp
+
+# Подключаем логгер проекта, чтобы видеть сообщения в консоли Railway
+logger = logging.getLogger(__name__)
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -20,16 +24,16 @@ def download_video(url: str) -> str:
     cookies_source = "cookies.txt"
     cookies_cleaned = os.path.join(DOWNLOAD_DIR, "clean_cookies.txt")
     
-    # ПРОВЕРКА КУК ДЛЯ ЛОГОВ RAILWAY
+    # ПРОВЕРКА КУК ЧЕРЕЗ ЛОГГЕР
     if os.path.exists(cookies_source):
-        print(f"[COOKIES INFO] Файл {cookies_source} НАЙДЕН на сервере. Очищаем...")
+        logger.info(f"[COOKIES] Файл {cookies_source} НАЙДЕН на сервере. Очищаем от BOM...")
         with open(cookies_source, "r", encoding="utf-8-sig", errors="ignore") as f:
             content = f.read()
         cleaned_content = content.lstrip()
         with open(cookies_cleaned, "w", encoding="utf-8") as f:
             f.write(cleaned_content)
     else:
-        print(f"[COOKIES WARNING] Файл {cookies_source} НЕ НАЙДЕН в корне проекта на сервере!")
+        logger.error(f"[COOKIES] Файл {cookies_source} НЕ НАЙДЕН в корне проекта на сервере Railway!")
         cookies_cleaned = None
 
     base_opts = {
@@ -40,18 +44,21 @@ def download_video(url: str) -> str:
         "retries": 3,
     }
 
-    # Используем "best" — самый надежный одиночный поток, не требующий сборки
+    # Каскад стратегий с разными клиентами YouTube
     strategies = [
+        # 1. Мобильный веб + Куки (самый живучий вариант против блокировок форматов)
         {
             "format": "best",
             "cookiefile": cookies_cleaned,
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}}
+            "extractor_args": {"youtube": {"player_client": ["mweb", "web"]}}
         },
+        # 2. IOS клиент + Куки
         {
             "format": "best",
             "cookiefile": cookies_cleaned,
             "extractor_args": {"youtube": {"player_client": ["ios"]}}
         },
+        # 3. Деградация до ТВ-клиента (не требует кук, но видео может быть в низком качестве)
         {
             "format": "best",
             "extractor_args": {"youtube": {"player_client": ["tv_downgraded"]}}
@@ -62,12 +69,13 @@ def download_video(url: str) -> str:
     download_info = None
     last_error = None
 
-    for strat in strategies:
+    for i, strat in enumerate(strategies, start=1):
         if "cookiefile" in strat and not cookies_cleaned:
             continue
             
         opts = {**base_opts, **strat}
         try:
+            logger.info(f"[DOWNLOAD] Пробуем стратегию обхода №{i}...")
             with yt_dlp.YoutubeDL(opts) as ydl:
                 download_info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(download_info)
@@ -81,13 +89,15 @@ def download_video(url: str) -> str:
                             break
                             
                 if filename and os.path.exists(filename):
+                    logger.info(f"[DOWNLOAD] Успешно скачано стратегией №{i}")
                     break
         except Exception as e:
+            logger.warning(f"[DOWNLOAD] Стратегия №{i} провалилась: {e}")
             last_error = e
             continue
 
     if not filename or not os.path.exists(filename):
-        raise last_error or FileNotFoundError("YouTube полностью заблокировал доступ к форматам.")
+        raise last_error or FileNotFoundError("YouTube полностью заблокировал доступ к потокам видео.")
 
     duration = download_info.get("duration", 0) if download_info else 0
 
