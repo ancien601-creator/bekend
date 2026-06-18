@@ -20,6 +20,7 @@ def is_supported_url(url: str) -> bool:
 def download_video(url: str) -> str:
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
     
+    # Обработка куки файлов
     cookies_source = "cookies.txt"
     cookies_cleaned = os.path.join(DOWNLOAD_DIR, "clean_cookies.txt")
     
@@ -33,9 +34,8 @@ def download_video(url: str) -> str:
     else:
         cookies_cleaned = None
 
-    # Читаем прокси и PO-Token из переменных окружения Railway
-    proxy = os.getenv("YOUTUBE_PROXY")
-    po_token = os.getenv("YOUTUBE_PO_TOKEN")  # Формат: "web+PO_TOKEN_VALUE"
+    # Проверяем переменную в Railway. Если её нет — берем твой рабочий прокси напрямую
+    proxy = os.getenv("YOUTUBE_PROXY", "http://uprgysua:kmbu4o3u05kx@31.59.20.176:6754/")
 
     base_opts = {
         "outtmpl": out_template,
@@ -43,42 +43,36 @@ def download_video(url: str) -> str:
         "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
-        "format": "bestvideo+bestaudio/best",
+        "format": "bestvideo+bestaudio/best",  # Качаем видео и звук раздельно для обхода ограничений
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         }
     }
 
-    # Если в Railway задан прокси, добавляем его в конфигурацию
     if proxy:
-        logger.info("[PROXY] Обнаружен прокси-сервер. Запросы пойдут через него.")
+        logger.info(f"[PROXY] Используем прокси-сервер для обхода бана YouTube.")
         base_opts["proxy"] = proxy
 
-    # Формируем аргументы экстрактора (включая po_token при наличии)
-    yt_args = {}
-    if po_token:
-        logger.info("[PO-TOKEN] Обнаружен PO-Token. Внедряем в запросы YouTube.")
-        yt_args["po_token"] = [po_token]
-
+    # Список стратегий (разные клиенты YouTube для надежности)
     strategies = [
-        # 1. ТВ-клиент
+        # 1. ТВ-клиент (самый устойчивый)
         {
-            "extractor_args": {"youtube": {**yt_args, "player_client": ["tv_downgraded"]}}
+            "extractor_args": {"youtube": {"player_client": ["tv_downgraded"]}}
         },
         # 2. Клиент Творческой студии
         {
-            "extractor_args": {"youtube": {**yt_args, "player_client": ["creator"]}}
+            "extractor_args": {"youtube": {"player_client": ["creator"]}}
         },
-        # 3. Android клиент с куками
+        # 3. Android клиент (с куками, если есть)
         {
             "cookiefile": cookies_cleaned,
-            "extractor_args": {"youtube": {**yt_args, "player_client": ["android"]}}
+            "extractor_args": {"youtube": {"player_client": ["android"]}}
         },
-        # 4. Встроенный плеер
+        # 4. Встроенный плеер браузера
         {
             "cookiefile": cookies_cleaned,
-            "extractor_args": {"youtube": {**yt_args, "player_client": ["web_embedded"]}}
+            "extractor_args": {"youtube": {"player_client": ["web_embedded"]}}
         }
     ]
 
@@ -99,6 +93,7 @@ def download_video(url: str) -> str:
                 download_info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(download_info)
                 
+                # Корректировка расширения файла после склейки ffmpeg (mkv/webm -> mp4)
                 if filename and not os.path.exists(filename):
                     base, _ = os.path.splitext(filename)
                     for ext in (".mp4", ".webm", ".mkv", ".3gp"):
@@ -108,7 +103,7 @@ def download_video(url: str) -> str:
                             break
                             
                 if filename and os.path.exists(filename):
-                    logger.info(f"[DOWNLOAD] Успешно скачано стратегией №{i}")
+                    logger.info(f"[DOWNLOAD] Видео успешно скачано стратегией №{i}")
                     break
         except Exception as e:
             logger.warning(f"[DOWNLOAD] Стратегия №{i} ({client_name}) не сработала: {e}")
@@ -116,13 +111,14 @@ def download_video(url: str) -> str:
             continue
 
     if not filename or not os.path.exists(filename):
-        raise last_error or FileNotFoundError("YouTube полностью заблокировал доступ к потокам видео.")
+        raise last_error or FileNotFoundError("YouTube полностью заблокировал доступ. Прокси не помог.")
 
     duration = download_info.get("duration", 0) if download_info else 0
 
+    # Блок сжатия видео через ffmpeg, если файл весит больше 50 МБ
     if os.path.getsize(filename) > MAX_FILESIZE:
         if duration > 0:
-            logger.info("[COMPRESS] Файл слишком большой. Сжимаем через ffmpeg...")
+            logger.info("[COMPRESS] Файл превышает 50 МБ. Запускаем сжатие...")
             compressed_filename = os.path.join(DOWNLOAD_DIR, f"compressed_{uuid.uuid4()}.mp4")
             target_size_bits = 46 * 1024 * 1024 * 8
             target_bitrate = int(target_size_bits / duration)
@@ -144,14 +140,14 @@ def download_video(url: str) -> str:
                 subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 os.remove(filename)
                 filename = compressed_filename
-                logger.info("[COMPRESS] Сжатие завершено успешно.")
+                logger.info("[COMPRESS] Сжатие завершено.")
             except Exception as compress_err:
-                logger.error(f"[COMPRESS] Ошибка при сжатии: {compress_err}")
+                logger.error(f"[COMPRESS] Ошибка сжатия: {compress_err}")
                 if os.path.getsize(filename) > MAX_FILESIZE:
                     os.remove(filename)
-                    raise ValueError("Файл слишком большой для отправки.")
+                    raise ValueError("Файл слишком большой для отправки в Telegram (>50MB).")
         else:
             os.remove(filename)
-            raise ValueError("Файл слишком большой, а его длительность не определена.")
+            raise ValueError("Файл превышает 50 МБ, сжатие невозможно (не определена длина).")
 
     return filename
