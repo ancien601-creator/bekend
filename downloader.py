@@ -40,8 +40,14 @@ def download_video(url: str) -> str:
     else:
         cookies_cleaned = cookies_source
 
-    # Имитация клиентов для обхода блокировок форматов
-    client_spoofing = {"youtube": {"player_client": ["android", "web", "ios"]}}
+    # Обход блокировок Ютуба: используем клиенты без жесткого PO Token (tv, mweb)
+    # и принудительно разрешаем форматы с пометкой "missing_pot"
+    client_spoofing = {
+        "youtube": {
+            "player_client": "tv,mweb,android_vr",
+            "formats": "missing_pot"
+        }
+    }
 
     # --- ШАГ 1: Попытка узнать длительность ---
     duration = 0
@@ -60,14 +66,13 @@ def download_video(url: str) -> str:
         duration = 0
 
     # --- ШАГ 2: Выбор качественного формата ---
-    # Больше не режем качество до 360р! Даем приоритет 1080р и 720р.
     if duration == 0:
         fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-    elif duration <= 600:  # До 10 минут — берем максимум (1080p)
+    elif duration <= 600:  # До 10 минут — 1080p
         fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-    elif duration <= 1800: # До 30 минут — берем отличный стандарт (720p)
+    elif duration <= 1800: # До 30 минут — 720p
         fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-    else:                  # Очень долгие видео — 480p (иначе сервер будет сжимать часами)
+    else:                  # Очень долгие видео — 480p
         fmt = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
 
     ydl_opts = {
@@ -82,65 +87,72 @@ def download_video(url: str) -> str:
         "extractor_args": client_spoofing
     }
 
-    # --- ШАГ 3: Скачивание файла ---
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        download_info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(download_info)
+    # --- ШАГ 3: Скачивание файла с автоматическим откатом (Fallback) ---
+    download_info = None
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            download_info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(download_info)
+    except Exception as e:
+        # Если Ютуб скрыл HD форматы на сервере, берем абсолютно любой доступный рабочий формат ("best")
+        error_msg = str(e)
+        if "Requested format is not available" in error_msg or "No video formats found" in error_msg:
+            ydl_opts["format"] = "best"
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                download_info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(download_info)
+        else:
+            raise e
 
-        # Перестраховка по расширениям
-        if not os.path.exists(filename):
-            base, _ = os.path.splitext(filename)
-            for ext in (".mp4", ".webm", ".mkv", ".3gp"):
-                candidate = base + ext
-                if os.path.exists(candidate):
-                    filename = candidate
-                    break
+    # Перестраховка по расширениям
+    if not os.path.exists(filename):
+        base, _ = os.path.splitext(filename)
+        for ext in (".mp4", ".webm", ".mkv", ".3gp"):
+            candidate = base + ext
+            if os.path.exists(candidate):
+                filename = candidate
+                break
 
-        if not os.path.exists(filename):
-            raise FileNotFoundError("Не вдалося знайти завантажений файл")
+    if not os.path.exists(filename):
+        raise FileNotFoundError("Не вдалося знайти завантажений файл")
 
-        # Если на первом шаге длину не узнали, берем её из скачанного файла
-        if duration == 0 and download_info:
-            duration = download_info.get("duration", 0)
+    if duration == 0 and download_info:
+        duration = download_info.get("duration", 0)
 
-        # --- ШАГ 4: Умное сжатие через FFmpeg (только если файл > 50MB) ---
-        if os.path.getsize(filename) > MAX_FILESIZE:
-            if duration > 0:
-                compressed_filename = os.path.join(DOWNLOAD_DIR, f"compressed_{uuid.uuid4()}.mp4")
-                
-                # Таргетируем в 46 МБ, чтобы железно пройти фильтр ТГ
-                target_size_bits = 46 * 1024 * 1024 * 8
-                target_bitrate = int(target_size_bits / duration)
-                
-                # Задаем аудио-битрейт (128к для видео пойдет, для экономии можно 96к)
-                audio_bitrate = 128000
-                video_bitrate = target_bitrate - audio_bitrate
-                
-                if video_bitrate < 150000:
-                    video_bitrate = 150000
+    # --- ШАГ 4: Умное сжатие через FFmpeg (только если файл > 50MB) ---
+    if os.path.getsize(filename) > MAX_FILESIZE:
+        if duration > 0:
+            compressed_filename = os.path.join(DOWNLOAD_DIR, f"compressed_{uuid.uuid4()}.mp4")
+            
+            target_size_bits = 46 * 1024 * 1024 * 8
+            target_bitrate = int(target_size_bits / duration)
+            
+            audio_bitrate = 128000
+            video_bitrate = target_bitrate - audio_bitrate
+            
+            if video_bitrate < 150000:
+                video_bitrate = 150000
 
-                # Используем preset veryfast вместо ultrafast — это сохранит детализацию и уберет "кубики"
-                cmd = [
-                    "ffmpeg", "-y", "-i", filename,
-                    "-b:v", str(video_bitrate),
-                    "-maxrate", str(int(video_bitrate * 1.2)),
-                    "-bufsize", str(int(video_bitrate * 2)),
-                    "-c:v", "libx264", "-preset", "veryfast",
-                    "-c:a", "aac", "-b:a", "128k",
-                    compressed_filename
-                ]
-                
-                try:
-                    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    os.remove(filename)
-                    filename = compressed_filename
-                except Exception:
-                    # Если FFmpeg дал сбой, проверяем вес. Если всё еще огромный — удаляем.
-                    if os.path.getsize(filename) > MAX_FILESIZE:
-                        os.remove(filename)
-                        raise ValueError("Не вдалося стиснути відео під ліміт Telegram.")
-            else:
+            cmd = [
+                "ffmpeg", "-y", "-i", filename,
+                "-b:v", str(video_bitrate),
+                "-maxrate", str(int(video_bitrate * 1.2)),
+                "-bufsize", str(int(video_bitrate * 2)),
+                "-c:v", "libx264", "-preset", "veryfast",
+                "-c:a", "aac", "-b:a", "128k",
+                compressed_filename
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 os.remove(filename)
-                raise ValueError("Відео занадто велике (>50 МБ), і не вдалося визначити його тривалість для стиснення.")
+                filename = compressed_filename
+            except Exception:
+                if os.path.getsize(filename) > MAX_FILESIZE:
+                    os.remove(filename)
+                    raise ValueError("Не вдалося стиснути відео під ліміт Telegram.")
+        else:
+            os.remove(filename)
+            raise ValueError("Відео занадто велике (>50 МБ), і не вдалося визначити его тривалість для стиснення.")
 
-        return filename
+    return filename
