@@ -11,18 +11,9 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 MAX_FILESIZE = 50 * 1024 * 1024
 
-# Полный объединенный список прокси (Webshare + Бесплатные публичные прокси)
+# Очищенный пул прокси (удалены неоплаченные Webshare с ошибкой 402)
 PROXIES_LIST = [
-    "http://uprgysua:kmbu4o3u05kx@31.59.20.176:6754/",
-    "http://uprgysua:kmbu4o3u05kx@92.113.242.158:6742/",
-    "http://uprgysua:kmbu4o3u05kx@38.154.203.95:5863/",
-    "http://uprgysua:kmbu4o3u05kx@198.105.121.200:6462/",
-    "http://uprgysua:kmbu4o3u05kx@64.137.96.74:6641/",
-    "http://uprgysua:kmbu4o3u05kx@38.154.185.97:6370/",
-    "http://uprgysua:kmbu4o3u05kx@142.111.67.146:5611/",
-    "http://uprgysua:kmbu4o3u05kx@191.96.254.138:6185/",
-    "http://uprgysua:kmbu4o3u05kx@23.229.19.94:8689/",
-    "http://uprgysua:kmbu4o3u05kx@2.57.20.2:6983/",
+    # --- Публичные прокси (Advanced Name) ---
     "socks5://188.68.205.126:1080",
     "socks5://46.150.102.26:1080",
     "socks5://193.239.26.142:9000",
@@ -50,7 +41,50 @@ PROXIES_LIST = [
     "socks5://103.138.145.228:1999",
     "http://95.66.138.21:8880",
     "http://66.175.236.184:2080",
-    "socks4://122.154.71.65:1080"
+    "socks4://122.154.71.65:1080",
+
+    # --- Скриншоты MikroTik ---
+    "http://115.127.95.82:8080",
+    "http://186.96.74.140:999",
+    "http://185.120.201.27:8080",
+    "http://131.222.253.73:8080",
+    "http://201.182.242.4:999",
+    "http://103.252.220.22:8081",
+    "http://103.139.99.230:8080",
+    "http://65.20.154.62:28080",
+    "http://181.114.62.1:8085",
+    "http://165.16.58.124:8080",
+
+    # --- Geonix ---
+    "http://142.54.228.193:4145",
+    "socks5://138.68.60.8:1080",
+    "http://8.217.147.173:8080",
+    "http://174.77.111.196:4145",
+    "http://72.195.34.59:4145",
+    "http://117.54.114.103:80",
+    "http://192.252.216.86:4145",
+    "http://8.213.197.208:45",
+    "socks5://93.182.26.66:1080",
+    "http://149.200.200.44:80",
+    "http://45.167.126.252:8080",
+    "http://60.174.167.40:4999",
+    "http://39.104.57.33:8081",
+    "http://47.119.22.92:8081",
+    "http://194.39.254.35:80",
+    "http://8.213.222.157:443",
+    "http://110.44.115.83:8080",
+    "http://218.75.224.4:3309",
+    "http://142.54.226.214:4145",
+    "http://208.102.51.6:58208",
+    "http://101.255.165.106:8090",
+    "http://103.184.56.122:8080",
+    "http://211.251.236.253:80",
+    "http://39.104.27.89:8004",
+    "http://8.220.204.92:81",
+    "http://8.220.204.215:8000",
+    "http://98.152.200.61:8081",
+    "http://177.19.167.242:80",
+    "http://31.145.149.75:9090"
 ]
 
 def is_supported_url(url: str) -> bool:
@@ -61,7 +95,6 @@ def download_video(url: str) -> str:
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
     url_lower = url.lower()
     
-    # Обработка куки файлов
     cookies_source = "cookies.txt"
     cookies_cleaned = os.path.join(DOWNLOAD_DIR, "clean_cookies.txt")
     
@@ -80,7 +113,8 @@ def download_video(url: str) -> str:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "retries": 2,
+        "retries": 1,
+        "socket_timeout": 4,  # Жесткий лимит: если прокси тупит больше 4 секунд — сбрасываем
         "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[ext=mp4]/best",
         "merge_output_format": "mp4",
         "http_headers": {
@@ -93,7 +127,7 @@ def download_video(url: str) -> str:
     download_info = None
     last_error = None
 
-    # Если это НЕ YouTube (например, TikTok), качаем напрямую без прокси
+    # TikTok/Instagram качаем напрямую без прокси на максимальной скорости Railway
     if not any(domain in url_lower for domain in ("youtube.com", "youtu.be")):
         logger.info("[DIRECT] Ссылка не из YouTube. Качаем напрямую через Railway...")
         try:
@@ -105,8 +139,8 @@ def download_video(url: str) -> str:
         except Exception as e:
             raise e
 
-    # Если YouTube, запускаем систему ротации прокси
-    logger.info(f"[ROTATE] Начинаем перебор пула из {len(PROXIES_LIST)} прокси для YouTube.")
+    # Умная скоростная ротация для YouTube
+    logger.info(f"[ROTATE] Начинаем перебор пула из {len(PROXIES_LIST)} активных прокси.")
     
     strategies = [
         {"extractor_args": {"youtube": {"player_client": ["tv_downgraded"]}}},
@@ -145,17 +179,17 @@ def download_video(url: str) -> str:
                                 break
                                 
                     if filename and os.path.exists(filename):
-                        logger.info(f"[SUCCESS] Успешно скачано через Прокси №{p_idx} и Стратегию №{s_idx}")
+                        logger.info(f"[SUCCESS] Успешно скачано через Прокси №{p_idx}")
                         proxy_success = True
                         break
             except Exception as e:
                 err_msg = str(e)
-                logger.warning(f"[FAIL] Прокси №{p_idx}, Стратегия №{s_idx} дала сбой: {err_msg}")
+                logger.warning(f"[FAIL] Прокси №{p_idx}, Стратегия №{s_idx} мимо.")
                 last_error = e
                 
-                # Если прокси мертв (402, 407 или туннель не отвечает) — переходим к следующему IP
-                if "402" in err_msg or "Tunnel connection failed" in err_msg or "407" in err_msg:
-                    logger.error(f"[PROXY DEAD] Прокси №{p_idx} недоступен. Переходим к следующему IP...")
+                # Если прокси выдает ошибку сети, блокировку или упал — мгновенно прерываем стратегии и меняем IP
+                if any(err in err_msg for err in ("402", "Tunnel", "407", "403", "Connection refused", "timed out", "Timeout")):
+                    logger.error(f"[PROXY DEAD] Прокси №{p_idx} недоступен. Смена IP...")
                     break
                 continue
                 
@@ -163,12 +197,12 @@ def download_video(url: str) -> str:
             break
 
     if not filename or not os.path.exists(filename):
-        raise last_error or FileNotFoundError("Все прокси из списка были отклонены YouTube (возможно, нерабочие).")
+        raise last_error or FileNotFoundError("Все прокси из пула заблокированы YouTube или недоступны.")
 
     return finalize_video(filename, download_info)
 
 def finalize_video(filename: str, download_info: dict) -> str:
-    """Проверка размера и сжатие видео через ffmpeg"""
+    """Проверка размера и сжатие видео через ffmpeg до 50 МБ"""
     duration = download_info.get("duration", 0) if download_info else 0
 
     if os.path.getsize(filename) > MAX_FILESIZE:
@@ -206,6 +240,7 @@ def finalize_video(filename: str, download_info: dict) -> str:
                     raise ValueError("Файл слишком большой для отправки в Telegram (>50MB).")
         else:
             os.remove(filename)
-            raise ValueError("Файл превышает 50 МБ, сжатие невозможно (не определена длина).")
+            raise ValueError("Файл превышает 50 МБ, сжатие невозможно (не определена длительность).")
 
     return filename
+            
