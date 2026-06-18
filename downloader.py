@@ -6,7 +6,7 @@ import yt_dlp
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Жесткий лимит Telegram Bot API (50 МБ)
+# Лимит Telegram Bot API (50 МБ)
 MAX_FILESIZE = 50 * 1024 * 1024
 
 
@@ -22,8 +22,8 @@ def is_supported_url(url: str) -> bool:
 
 def download_video(url: str) -> str:
     """
-    Скачивает видео в высоком качестве, а если YouTube блокирует форматы —
-    автоматически переключается на аварийный iOS-клиент.
+    Скачивает видео, используя каскад из 4 стратегий обхода блокировок YouTube.
+    Задействует Smart-TV клиенты для обхода JS-челленджей (n-challenge).
     """
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
     
@@ -38,92 +38,83 @@ def download_video(url: str) -> str:
         with open(cookies_cleaned, "w", encoding="utf-8") as f:
             f.write(cleaned_content)
     else:
-        cookies_cleaned = cookies_source
+        cookies_cleaned = None
 
-    # Стандартная маскировка под Android/Web
-    client_spoofing = {"youtube": {"player_client": ["android", "web"]}}
-
-    # --- ШАГ 1: Попытка узнать длительность ---
-    duration = 0
-    meta_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "cookiefile": cookies_cleaned,
-        "extractor_args": client_spoofing
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(meta_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            duration = info.get("duration", 0)
-    except Exception:
-        duration = 0
-
-    # --- ШАГ 2: Выбор целевого формата ---
-    if duration == 0:
-        fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-    elif duration <= 600:
-        fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-    elif duration <= 1800:
-        fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-    else:
-        fmt = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
-
-    ydl_opts = {
+    # Базовые неизменяемые настройки для всех попыток
+    base_opts = {
         "outtmpl": out_template,
-        "format": fmt,
-        "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "retries": 3,
-        "cookiefile": cookies_cleaned,
-        "extractor_args": client_spoofing
+        "retries": 2,
     }
+
+    # Каскад стратегий от идеальной к аварийной
+    strategies = [
+        # Стратегия 1: Максимальное качество (1080p/720p) через Android/Web с куками
+        {
+            "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+            "merge_output_format": "mp4",
+            "cookiefile": cookies_cleaned,
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}}
+        },
+        # Стратегия 2: Обход JS-челленджа через Smart-TV (720p) с куками
+        {
+            "format": "bestvideo[height<=720]+bestaudio/best",
+            "merge_output_format": "mp4",
+            "cookiefile": cookies_cleaned,
+            "extractor_args": {"youtube": {"player_client": ["tv_downgraded", "android_embedded"]}}
+        },
+        # Стратегия 3: ТВ-клиент БЕЗ кук (на случай, если куки забанены Ютубом)
+        {
+            "format": "bestvideo[height<=720]+bestaudio/best",
+            "merge_output_format": "mp4",
+            "extractor_args": {"youtube": {"player_client": ["tv_downgraded", "android_embedded"]}}
+        },
+        # Стратегия 4: Жесткий аварийный режим — забираем любой цельный готовый поток
+        {
+            "format": "best",
+            "extractor_args": {"youtube": {"player_client": ["tv"]}}
+        }
+    ]
 
     filename = None
     download_info = None
+    last_error = None
 
-    # --- ШАГ 3: Скачивание файла с защитой от блокировок ---
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            download_info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(download_info)
-    except Exception as original_error:
-        # АВАРflag_РЕЖИМ: Если YouTube заблокировал сложные форматы (SABR/PO-Token блок),
-        # мы переключаемся на iOS-клиент и просим любой готовый цельный поток (best).
+    # Перебираем стратегии, пока одна из них не сработает
+    for i, strat in enumerate(strategies, start=1):
+        # Если стратегия требует куки, а файла cookies.txt нет — пропускаем её
+        if "cookiefile" in strat and not cookies_cleaned:
+            continue
+            
+        opts = {**base_opts, **strat}
         try:
-            emergency_opts = {
-                "outtmpl": out_template,
-                "format": "best", 
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "retries": 2,
-                "cookiefile": cookies_cleaned,
-                "extractor_args": {"youtube": {"player_client": ["ios"]}}
-            }
-            with yt_dlp.YoutubeDL(emergency_opts) as ydl:
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 download_info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(download_info)
-        except Exception:
-            # Если даже iOS-клиент не помог, пробрасываем базовую ошибку дальше
-            raise original_error
+                
+                # Защитная проверка расширений файла на диске
+                if filename and not os.path.exists(filename):
+                    base, _ = os.path.splitext(filename)
+                    for ext in (".mp4", ".webm", ".mkv", ".3gp"):
+                        candidate = base + ext
+                        if os.path.exists(candidate):
+                            filename = candidate
+                            break
+                            
+                if filename and os.path.exists(filename):
+                    break  # Успешно скачали, выходим из цикла стратегий!
+        except Exception as e:
+            last_error = e
+            continue
 
-    # Проверка и подстраховка по расширениям файла
-    if filename and not os.path.exists(filename):
-        base, _ = os.path.splitext(filename)
-        for ext in (".mp4", ".webm", ".mkv", ".3gp"):
-            candidate = base + ext
-            if os.path.exists(candidate):
-                filename = candidate
-                break
-
+    # Если ни одна стратегия не помогла — выбрасываем ошибку наружу
     if not filename or not os.path.exists(filename):
-        raise FileNotFoundError("Не вдалося знайти завантажений файл")
+        raise last_error or FileNotFoundError("Ютуб заблокировал все доступные методы обхода.")
 
-    if duration == 0 and download_info:
-        duration = download_info.get("duration", 0)
+    # Получаем длительность для последующего сжатия
+    duration = download_info.get("duration", 0) if download_info else 0
 
     # --- ШАГ 4: Умное сжатие через FFmpeg (только если файл > 50MB) ---
     if os.path.getsize(filename) > MAX_FILESIZE:
@@ -155,9 +146,9 @@ def download_video(url: str) -> str:
             except Exception:
                 if os.path.getsize(filename) > MAX_FILESIZE:
                     os.remove(filename)
-                    raise ValueError("Не вдалося стиснути відео під ліміт Telegram.")
+                    raise ValueError("Не вдалося стиснути відео під лимит Telegram.")
         else:
             os.remove(filename)
-            raise ValueError("Відео занадто велике (>50 МБ), і не вдалося визначити його тривалість для стиснення.")
+            raise ValueError("Відео занадто велике (>50 МБ), не вдалося визначити тривалість.")
 
     return filename
