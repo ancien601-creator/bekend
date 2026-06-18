@@ -22,8 +22,8 @@ def is_supported_url(url: str) -> bool:
 
 def download_video(url: str) -> str:
     """
-    Скачивает видео в низком качестве (360p или worst), используя гибкие фильтры,
-    чтобы аварийные клиенты (iOS/ТВ) не падали с ошибкой отсутствия форматов.
+    Скачивает видео в нормальном качестве (до 720p) с автоматическим
+    каскадным перебором клиентов, если YouTube начинает капризничать.
     """
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
     
@@ -48,32 +48,29 @@ def download_video(url: str) -> str:
         "retries": 3,
     }
 
-    # Универсальный и гибкий фильтр низкого качества:
-    # Ищет 360p, если нет — берет самый минимальный доступный формат (worst)
-    low_quality_fmt = "bestvideo[height<=360]+bestaudio/best[height<=360]/worst"
+    # Возвращаем нормальный человеческий формат (до 720p)
+    # Если 720р нет, он просто возьмет лучшее из доступных
+    standard_fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
 
     strategies = [
-        # Стратегия 1: Встроенный плеер Android (часто пропускает без капчи)
+        # 1. Основная стратегия: Стандартный Android/Web (работает в 90% случаев)
         {
-            "format": low_quality_fmt,
+            "format": standard_fmt,
+            "merge_output_format": "mp4",
             "cookiefile": cookies_cleaned,
-            "extractor_args": {"youtube": {"player_client": ["android_embedded", "web_embedded"]}}
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}}
         },
-        # Стратегия 2: Клиент iOS (у него свои форматы, но фильтр 'worst' выберет нужный)
+        # 2. Аварийная стратегия: Переключение на iOS клиент (у него другие алгоритмы проверки)
         {
-            "format": low_quality_fmt,
+            "format": standard_fmt,
+            "merge_output_format": "mp4",
             "cookiefile": cookies_cleaned,
             "extractor_args": {"youtube": {"player_client": ["ios"]}}
         },
-        # Стратегия 3: Smart-TV клиент без использования кук (на случай бана аккаунта)
+        # 3. На крайний случай: ТВ-клиент, который вообще не проверяет JS-коды
         {
-            "format": "best[height<=360]/worst",
+            "format": "best",
             "extractor_args": {"youtube": {"player_client": ["tv_downgraded"]}}
-        },
-        # Стратегия 4: Тотальный сброс — забрать вообще хоть что-нибудь
-        {
-            "format": "worst",
-            "extractor_args": {"youtube": {"player_client": ["tv"]}}
         }
     ]
 
@@ -82,6 +79,7 @@ def download_video(url: str) -> str:
     last_error = None
 
     for strat in strategies:
+        # Пропускаем стратегии с куками, если самого файла cookies.txt нет
         if "cookiefile" in strat and not cookies_cleaned:
             continue
             
@@ -91,7 +89,7 @@ def download_video(url: str) -> str:
                 download_info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(download_info)
                 
-                # Проверка расширений на диске
+                # Проверка расширений файла на диске
                 if filename and not os.path.exists(filename):
                     base, _ = os.path.splitext(filename)
                     for ext in (".mp4", ".webm", ".mkv", ".3gp"):
@@ -101,33 +99,35 @@ def download_video(url: str) -> str:
                             break
                             
                 if filename and os.path.exists(filename):
-                    break  # Видео успешно скачано!
+                    break
         except Exception as e:
             last_error = e
             continue
 
     if not filename or not os.path.exists(filename):
-        raise last_error or FileNotFoundError("Ютуб заблокировал все попытки скачивания.")
+        raise last_error or FileNotFoundError("Не вдалося завантажити відео через жодну стратегию.")
 
     duration = download_info.get("duration", 0) if download_info else 0
 
-    # Сжатие через FFmpeg (на случай, если скачался worst-файл, но видео идет 3 часа)
+    # Интеллектуальное сжатие через FFmpeg, если файл превысил 50 МБ
     if os.path.getsize(filename) > MAX_FILESIZE:
         if duration > 0:
             compressed_filename = os.path.join(DOWNLOAD_DIR, f"compressed_{uuid.uuid4()}.mp4")
             target_size_bits = 46 * 1024 * 1024 * 8
             target_bitrate = int(target_size_bits / duration)
             
-            audio_bitrate = 64000
+            audio_bitrate = 128000
             video_bitrate = target_bitrate - audio_bitrate
-            if video_bitrate < 100000:
-                video_bitrate = 100000
+            if video_bitrate < 150000:
+                video_bitrate = 150000
 
             cmd = [
                 "ffmpeg", "-y", "-i", filename,
                 "-b:v", str(video_bitrate),
+                "-maxrate", str(int(video_bitrate * 1.2)),
+                "-bufsize", str(int(video_bitrate * 2)),
                 "-c:v", "libx264", "-preset", "veryfast",
-                "-c:a", "aac", "-b:a", "64k",
+                "-c:a", "aac", "-b:a", "128k",
                 compressed_filename
             ]
             
@@ -138,9 +138,9 @@ def download_video(url: str) -> str:
             except Exception:
                 if os.path.getsize(filename) > MAX_FILESIZE:
                     os.remove(filename)
-                    raise ValueError("Не вдалося втиснути файл у ліміт Telegram.")
+                    raise ValueError("Не вдалося стиснути відео під ліміт Telegram.")
         else:
             os.remove(filename)
-            raise ValueError("Файл занадто великий, а его длительность неизвестна.")
+            raise ValueError("Відео занадто велике, а его длительность неизвестна.")
 
     return filename
