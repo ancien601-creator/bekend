@@ -22,8 +22,8 @@ def is_supported_url(url: str) -> bool:
 
 def download_video(url: str) -> str:
     """
-    Скачивает видео в максимально возможном качестве (до 1080p)
-    и интеллектуально сжимает его через FFmpeg до 45-48 МБ только при необходимости.
+    Скачивает видео в высоком качестве, а если YouTube блокирует форматы —
+    автоматически переключается на аварийный iOS-клиент.
     """
     out_template = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s")
     
@@ -40,14 +40,8 @@ def download_video(url: str) -> str:
     else:
         cookies_cleaned = cookies_source
 
-    # Обход блокировок Ютуба: используем клиенты без жесткого PO Token (tv, mweb)
-    # и принудительно разрешаем форматы с пометкой "missing_pot"
-    client_spoofing = {
-        "youtube": {
-            "player_client": "tv,mweb,android_vr",
-            "formats": "missing_pot"
-        }
-    }
+    # Стандартная маскировка под Android/Web
+    client_spoofing = {"youtube": {"player_client": ["android", "web"]}}
 
     # --- ШАГ 1: Попытка узнать длительность ---
     duration = 0
@@ -65,14 +59,14 @@ def download_video(url: str) -> str:
     except Exception:
         duration = 0
 
-    # --- ШАГ 2: Выбор качественного формата ---
+    # --- ШАГ 2: Выбор целевого формата ---
     if duration == 0:
         fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-    elif duration <= 600:  # До 10 минут — 1080p
+    elif duration <= 600:
         fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-    elif duration <= 1800: # До 30 минут — 720p
+    elif duration <= 1800:
         fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-    else:                  # Очень долгие видео — 480p
+    else:
         fmt = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
 
     ydl_opts = {
@@ -87,25 +81,37 @@ def download_video(url: str) -> str:
         "extractor_args": client_spoofing
     }
 
-    # --- ШАГ 3: Скачивание файла с автоматическим откатом (Fallback) ---
+    filename = None
     download_info = None
+
+    # --- ШАГ 3: Скачивание файла с защитой от блокировок ---
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             download_info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(download_info)
-    except Exception as e:
-        # Если Ютуб скрыл HD форматы на сервере, берем абсолютно любой доступный рабочий формат ("best")
-        error_msg = str(e)
-        if "Requested format is not available" in error_msg or "No video formats found" in error_msg:
-            ydl_opts["format"] = "best"
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    except Exception as original_error:
+        # АВАРflag_РЕЖИМ: Если YouTube заблокировал сложные форматы (SABR/PO-Token блок),
+        # мы переключаемся на iOS-клиент и просим любой готовый цельный поток (best).
+        try:
+            emergency_opts = {
+                "outtmpl": out_template,
+                "format": "best", 
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "retries": 2,
+                "cookiefile": cookies_cleaned,
+                "extractor_args": {"youtube": {"player_client": ["ios"]}}
+            }
+            with yt_dlp.YoutubeDL(emergency_opts) as ydl:
                 download_info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(download_info)
-        else:
-            raise e
+        except Exception:
+            # Если даже iOS-клиент не помог, пробрасываем базовую ошибку дальше
+            raise original_error
 
-    # Перестраховка по расширениям
-    if not os.path.exists(filename):
+    # Проверка и подстраховка по расширениям файла
+    if filename and not os.path.exists(filename):
         base, _ = os.path.splitext(filename)
         for ext in (".mp4", ".webm", ".mkv", ".3gp"):
             candidate = base + ext
@@ -113,7 +119,7 @@ def download_video(url: str) -> str:
                 filename = candidate
                 break
 
-    if not os.path.exists(filename):
+    if not filename or not os.path.exists(filename):
         raise FileNotFoundError("Не вдалося знайти завантажений файл")
 
     if duration == 0 and download_info:
@@ -123,7 +129,6 @@ def download_video(url: str) -> str:
     if os.path.getsize(filename) > MAX_FILESIZE:
         if duration > 0:
             compressed_filename = os.path.join(DOWNLOAD_DIR, f"compressed_{uuid.uuid4()}.mp4")
-            
             target_size_bits = 46 * 1024 * 1024 * 8
             target_bitrate = int(target_size_bits / duration)
             
@@ -153,6 +158,6 @@ def download_video(url: str) -> str:
                     raise ValueError("Не вдалося стиснути відео під ліміт Telegram.")
         else:
             os.remove(filename)
-            raise ValueError("Відео занадто велике (>50 МБ), і не вдалося визначити его тривалість для стиснення.")
+            raise ValueError("Відео занадто велике (>50 МБ), і не вдалося визначити його тривалість для стиснення.")
 
     return filename
