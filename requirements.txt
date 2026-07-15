@@ -1,0 +1,9 @@
+aiogram>=3.10
+fastapi>=0.110
+uvicorn[standard]
+aiohttp
+aiosqlite
+sqlalchemy[asyncio]
+asyncpg
+fastapi-utils
+python-dotenv
