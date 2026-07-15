@@ -1,264 +1,136 @@
-import logging
+import asyncio
 import os
-import math
-import subprocess
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery
+from dotenv import load_dotenv
+from models import init_db, async_session, User, Transaction, AdminSettings
+from sqlalchemy import select
 
-from telegram import Update, LabeledPrice
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    PreCheckoutQueryHandler,
-    ContextTypes,
-    filters,
-    ApplicationBuilder,
-)
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_IDS = [123456789]  # список админов
+WEBAPP_URL = "https://yourdomain.com/webapp"
 
-from db import (
-    init_db,
-    get_or_create_user,
-    get_free_left,
-    decrement_free,
-    set_pending_url,
-    get_pending_url,
-    clear_pending_url,
-    FREE_DOWNLOADS_DEFAULT,
-)
-from downloader import is_supported_url, download_video, MAX_FILESIZE
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-# Bot token: set as env variable BOT_TOKEN, or paste it directly here
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+# ------- Клавиатуры -------
+def main_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Кошелёк", web_app=WebAppInfo(url=f"{WEBAPP_URL}?tab=wallet"))],
+        [InlineKeyboardButton(text="📈 Рынок", web_app=WebAppInfo(url=f"{WEBAPP_URL}?tab=market"))],
+        [InlineKeyboardButton(text="🛒 Купить монеты", callback_data="buy_coins")],
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="📜 История", callback_data="history")],
+        [InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about")]
+    ])
 
-PRICE_STARS = 1  # price per video after free downloads run out
+# ------- Старт -------
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    async with async_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user:
+            user = User(id=message.from_user.id, balance=0, total_purchased=0)
+            session.add(user)
+            await session.commit()
+    await message.answer("🚀 Добро пожаловать в Moneta Bot!\n"
+                         "Здесь вы можете купить цифровые монеты и следить за их курсом.",
+                         reply_markup=main_keyboard())
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+# ------- Покупка монет (через Stars) -------
+@dp.callback_query(lambda c: c.data == "buy_coins")
+async def buy_coins_prompt(callback: types.CallbackQuery):
+    # Проверяем, разрешена ли покупка
+    async with async_session() as session:
+        setting = await session.get(AdminSettings, "buying_enabled")
+        if setting and setting.value == "false":
+            await callback.answer("⛔ Покупка монет временно отключена администратором.", show_alert=True)
+            return
+    await callback.message.answer("Введите количество монет (1 монета = 7 ⭐):")
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    get_or_create_user(user_id)
-    free_left = get_free_left(user_id)
-    await update.message.reply_text(
-        "👋 Привет! Я бот для скачивания видео из TikTok и YouTube.\n\n"
-        "🎬 Как я работаю:\n"
-        "1. Ты присылаешь мне ссылку на видео из TikTok \n"
-        "2. Я скачиваю его без водяных знаков и лишней рекламы\n"
-        "3. Отправляю готовое видео прямо тебе в чат\n\n"
-        f"🎁 У тебя есть {free_left} бесплатных скачиваний.\n"
-        f"После того как они закончатся, каждое следующее видео будет стоить "
-        f"{PRICE_STARS} ⭐ (Telegram Stars).\n\n"
-        "Просто отправь ссылку — и я всё сделаю сам 🚀"
+@dp.message(lambda m: m.text.isdigit() and m.chat.type == "private")
+async def process_coin_amount(message: types.Message):
+    amount = int(message.text)
+    if amount <= 0:
+        return await message.answer("Введите положительное число.")
+    # Создаём счёт
+    prices = [LabeledPrice(label="Moneta Coin", amount=amount * 7)]
+    await bot.send_invoice(
+        chat_id=message.chat.id,
+        title="Покупка Moneta",
+        description=f"{amount} MONETA = {amount * 7} Telegram Stars",
+        payload="buy_moneta",
+        currency="XTR",
+        prices=prices,
+        provider_token=""  # для XTR не нужен
     )
 
+@dp.pre_checkout_query()
+async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    await pre_checkout_query.answer(ok=True)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    get_or_create_user(user_id)
-    free_left = get_free_left(user_id)
-    await update.message.reply_text(
-        "ℹ️ О боте\n\n"
-        "Я умею скачивать видео из TikTok по ссылке — без водяных "
-        "знаков, без рекламы и без необходимости заходить в приложение.\n\n"
-        "📌 Как пользоваться:\n"
-        "— Скопируй ссылку на видео из TikTok или YouTube\n"
-        "— Отправь её мне в чат\n"
-        "— Дождись, пока я скачаю и пришлю готовый файл\n\n"
-        f"💰 Тариф: {FREE_DOWNLOADS_DEFAULT} первых скачиваний — бесплатно, "
-        f"далее {PRICE_STARS} ⭐ за каждое видео.\n"
-        f"Осталось бесплатных скачиваний: {free_left}\n\n"
-        "⚠️ Ограничение: видео не должно превышать 50MB."
-    )
+@dp.message(content_types=types.ContentType.SUCCESSFUL_PAYMENT)
+async def successful_payment(message: types.Message):
+    payload = message.successful_payment.invoice_payload
+    if payload == "buy_moneta":
+        # Вычисляем количество монет (из total_amount)
+        total_amount = message.successful_payment.total_amount  # в Stars (целое число)
+        amount_moneta = total_amount // 7
+        async with async_session() as session:
+            user = await session.get(User, message.from_user.id)
+            user.balance += amount_moneta
+            user.total_purchased += total_amount
+            # Запись транзакции
+            tx = Transaction(user_id=user.id, type="purchase", amount=amount_moneta,
+                             stars_amount=total_amount, price_at_moment=7.0)  # фиксированная цена
+            session.add(tx)
+            await session.commit()
+        await message.answer(f"✅ Куплено {amount_moneta} MONETA! Ваш баланс: {user.balance}")
 
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip()
-    user_id = update.effective_user.id
-    get_or_create_user(user_id)
-
-    if not is_supported_url(text):
-        await update.message.reply_text(
-            "Пожалуйста, отправь корректную ссылку на видео из TikTok или YouTube."
-        )
-        return
-
-    free_left = get_free_left(user_id)
-
-    if free_left > 0:
-        ok = await process_download(update, context, text)
-        if ok:
-            decrement_free(user_id)
-            remaining = free_left - 1
-            if remaining > 0:
-                await update.message.reply_text(
-                    f"Осталось бесплатных скачиваний: {remaining}"
-                )
-            else:
-                await update.message.reply_text(
-                    "Бесплатные скачивания закончились. "
-                    f"Следующие видео будут стоить {PRICE_STARS} ⭐."
-                )
+# ------- Профиль и история (заглушки) -------
+@dp.callback_query(lambda c: c.data in ["profile", "history", "about"])
+async def show_profile_history(callback: types.CallbackQuery):
+    if callback.data == "profile":
+        async with async_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            text = f"👤 Профиль\nID: {user.id}\nМонет: {user.balance}\nКуплено всего: {user.total_purchased} ⭐\nДата регистрации: {user.registered_at.strftime('%d.%m.%Y')}"
+    elif callback.data == "history":
+        async with async_session() as session:
+            txs = (await session.execute(
+                select(Transaction).where(Transaction.user_id == callback.from_user.id).order_by(Transaction.timestamp.desc()).limit(10)
+            )).scalars().all()
+            text = "📜 Последние операции:\n" + "\n".join(
+                f"{'🟢' if tx.type=='purchase' else '🔴'} {tx.amount} MON ({tx.stars_amount or 0} ⭐) – {tx.timestamp.strftime('%d.%m %H:%M')}"
+                for tx in txs
+            ) if txs else "Пока нет операций."
     else:
-        # Save the URL so we can download it after successful payment
-        set_pending_url(user_id, text)
-        await update.message.reply_invoice(
-            title="Скачивание видео",
-            description="Оплата за скачивание одного видео из TikTok/YouTube",
-            payload=f"video_download_{user_id}",
-            provider_token="",  # empty string is required for Telegram Stars
-            currency="XTR",
-            prices=[LabeledPrice("Скачивание видео", PRICE_STARS)],
-        )
+        text = "ℹ️ Moneta — цифровая валюта внутри Telegram."
+    await callback.message.edit_text(text, reply_markup=main_keyboard())
 
+# ------- Админ-панель -------
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("Нет доступа")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="🪙 Начислить/списать", callback_data="admin_balance")],
+        [InlineKeyboardButton(text="📈 Управление курсом", callback_data="admin_rate")],
+        [InlineKeyboardButton(text="✅ Вкл/выкл покупки", callback_data="admin_toggle_buy")],
+    ])
+    await message.answer("Админ-панель", reply_markup=kb)
 
-async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.pre_checkout_query
-    await query.answer(ok=True)
-
-
-async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    url = get_pending_url(user_id)
-
-    if not url:
-        await update.message.reply_text(
-            "Спасибо за оплату! Пожалуйста, отправь ссылку на видео ещё раз."
-        )
-        return
-
-    await update.message.reply_text("Спасибо за оплату ⭐! Скачиваю видео...")
-    await process_download(update, context, url)
-    clear_pending_url(user_id)
-
-
-def split_video(filepath: str, max_size_bytes: int) -> list[str]:
-    """Разрезает видео на части, если оно превышает лимит. Использует FFmpeg."""
-    total_size = os.path.getsize(filepath)
-
-    # Получаем длительность видео с помощью ffprobe
-    cmd_probe = [
-        'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-        '-of', 'csv=p=0', filepath
-    ]
-    probe_result = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-    total_duration = float(probe_result.stdout.strip())
-
-    # Считаем, на сколько частей нужно разбить
-    num_parts = math.ceil(total_size / max_size_bytes)
-    part_duration = total_duration / num_parts
-
-    base, ext = os.path.splitext(filepath)
-    output_pattern = f"{base}_part_%03d{ext}"
-
-    # Команда для быстрой нарезки без потери качества (-c copy)
-    cmd_split = [
-        'ffmpeg', '-y', '-i', filepath,
-        '-c', 'copy',
-        '-f', 'segment',
-        '-segment_time', str(part_duration),
-        '-reset_timestamps', '1',
-        output_pattern
-    ]
-    subprocess.run(cmd_split, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-
-    # Собираем пути к созданным частям
-    dir_name = os.path.dirname(filepath) or '.'
-    prefix = os.path.basename(base) + "_part_"
-    parts = [
-        os.path.join(dir_name, f)
-        for f in os.listdir(dir_name)
-        if f.startswith(prefix) and f.endswith(ext)
-    ]
-    return sorted(parts)
-
-
-async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> bool:
-    """Downloads the video and sends it to the user. Splits if too large."""
-    chat_id = update.effective_chat.id
-    status_msg = await update.message.reply_text("⏳ Скачиваю видео, подожди немного...")
-
-    filepath = None
-    video_parts = []
-    try:
-        filepath = download_video(url)
-        file_size = os.path.getsize(filepath)
-
-        # Если файл больше лимита (50MB)
-        if file_size > MAX_FILESIZE:
-            await status_msg.edit_text("🎬 Видео больше 50 МБ. Нарезаю на части, подожди...")
-
-            # Берем 48 МБ с запасом, чтобы Telegram точно пропустил
-            safe_limit = 48 * 1024 * 1024
-            video_parts = split_video(filepath, safe_limit)
-
-            if not video_parts:
-                await status_msg.edit_text("❌ Не удалось разделить видео на части.")
-                return False
-
-            await status_msg.edit_text(f"📦 Отправляю видео по частям (всего частей: {len(video_parts)})...")
-
-            for i, part_path in enumerate(video_parts):
-                with open(part_path, "rb") as f:
-                    await context.bot.send_video(
-                        chat_id=chat_id,
-                        video=f,
-                        supports_streaming=True,
-                        caption=f"Часть {i + 1} из {len(video_parts)}"
-                    )
-
-            await status_msg.delete()
-            return True
-
-        # Если файл маленький, отправляем как обычно
+@dp.callback_query(lambda c: c.data == "admin_toggle_buy")
+async def admin_toggle_buy(callback: types.CallbackQuery):
+    async with async_session() as session:
+        setting = await session.get(AdminSettings, "buying_enabled")
+        if setting is None:
+            setting = AdminSettings(key="buying_enabled", value="true")
+            session.add(setting)
         else:
-            with open(filepath, "rb") as f:
-                await context.bot.send_video(
-                    chat_id=chat_id,
-                    video=f,
-                    supports_streaming=True,
-                )
-            await status_msg.delete()
-            return True
-
-    except FileNotFoundError:
-        logger.exception("FFmpeg missing")
-        await status_msg.edit_text("❌ Ошибка: На сервере не установлен или не настроен FFmpeg для нарезки видео.")
-        return False
-    except Exception as e:
-        logger.exception("Download/send error")
-        await status_msg.edit_text(f"❌ Не удалось скачать или отправить видео: {e}")
-        return False
-
-    finally:
-        # Удаляем оригинальный файл
-        if filepath and os.path.exists(filepath):
-            os.remove(filepath)
-        # Удаляем нарезанные части, если они остались
-        for part_path in video_parts:
-            if os.path.exists(part_path):
-                os.remove(part_path)
-
-
-def main():
-    init_db()
-
-    
-
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    logger.info("Bot started")
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+            setting.value = "false" if setting.value == "true" else "true"
+        await session.commit()
+        status = "разрешена ✅" if setting.value == "true" else "запрещена ❌"
+    await callback.message.edit_text(f"Покупка теперь {status}")
