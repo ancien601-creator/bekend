@@ -10,7 +10,7 @@ from sqlalchemy import select
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [123456789]  # список админов
-WEBAPP_URL = "https://yourdomain.com/webapp"
+WEBAPP_URL = "https://cheerful-tapioca-69b65d.netlify.app/"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
